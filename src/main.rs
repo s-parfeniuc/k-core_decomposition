@@ -194,7 +194,7 @@ fn main() -> io::Result<()> {
 
     compute_coreness_queue(&mut algorithm);
 
-    //let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
+    let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
 
     Ok(())
 }
