@@ -2,40 +2,30 @@ use std::cmp;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 
 struct Graph {
     inmap: Vec<Vec<usize>>,
-    out: usize,
-    n_allocs: u32,
 }
 
 impl Graph {
     pub fn new() -> Self {
-        Graph {
-            inmap: Vec::new(),
-            out: 0,
-            n_allocs: 0,
-        }
+        Graph { inmap: Vec::new() }
     }
 
     fn add_edge(&mut self, i: usize, j: usize) -> Result<(), ()> {
         let max = max(i, j) + 1;
         if self.inmap.len() < max {
             self.inmap.resize(max, Vec::new());
-            self.n_allocs += 1;
         }
 
         self.inmap[i].push(j);
         self.inmap[j].push(i);
-        self.out += 1;
         Ok(())
     }
 
     pub fn debug_print(&mut self) {
         println!("Number of nodes: {}", self.inmap.len());
-        println!("Number of edges: {}", self.out);
-        println!("Number of resizes: {}", self.n_allocs);
     }
 
     pub fn no_duplicates(&mut self) {
@@ -51,99 +41,127 @@ impl Graph {
             self.inmap[i].truncate(n + 1);
         }
     }
-
-    pub fn print(&mut self) {
-        println!("Number of edges: {}", self.out);
-        for i in 0..self.inmap.len() {
-            for j in &self.inmap[i] {
-                println!("{} <--> {}", i, j);
-            }
-        }
-    }
 }
 
 struct Data {
     graph: Graph,
     est: Vec<usize>,
     changed: Vec<bool>,
-    count: Vec<Vec<usize>>,
-    queues: [VecDeque<(usize, usize)>; 2], //all'iterazione i uso i%2 come coda attuale e i+1%2 come coda per la prossima iterazione
+    count: Vec<usize>,
+    queue: VecDeque<usize>, //all'iterazione i uso i%2 come coda attuale e i+1%2 come coda per la prossima iterazione
 }
 
 impl Data {
     pub fn new(graph: Graph) -> Self {
         let mut est: Vec<usize> = Vec::with_capacity(graph.inmap.len());
         let mut changed: Vec<bool> = Vec::with_capacity(graph.inmap.len());
-        let mut count: Vec<Vec<usize>> = Vec::with_capacity(graph.inmap.len());
 
         for i in 0..graph.inmap.len() {
             est.push(graph.inmap[i].len());
             changed.push(false);
-            count.push(Vec::with_capacity(est[i]));
         }
         Data {
             graph: graph,
             est: est,
             changed: changed,
-            count: count,
-            queues: [VecDeque::new(), VecDeque::new()],
+            count: Vec::new(),
+            queue: VecDeque::new(),
         }
     }
 }
 
 fn compute_index(coreness: &mut Data, u: usize) -> usize {
     let core = coreness.est[u];
-    coreness.count[u].resize(core, 0);
+
+    if core == 0 {
+        return 0;
+    }
+    coreness.count.resize(core + 1, 0);
 
     for neighbor in &coreness.graph.inmap[u] {
-        let k = cmp::min(core - 1, coreness.est[*neighbor] - 1);
-        coreness.count[u][k] += 1;
+        let k = cmp::min(core, coreness.est[*neighbor]);
+        coreness.count[k] += 1;
     }
-    for i in (1..core - 1).rev() {
-        coreness.count[u][i - 1] += coreness.count[u][i];
+
+    for i in (1..core + 1).rev() {
+        coreness.count[i - 1] += coreness.count[i];
     }
-    let mut i = core - 1;
-    while i > 0 && coreness.count[u][i] < i {
+    let mut i = core;
+    while i > 1 && coreness.count[i] < i {
         i -= 1;
     }
-    coreness.count[u].clear();
-    return i + 1;
+    coreness.count.clear();
+    return i;
 }
 
-fn compute_coreness(core: &mut Data) {
-    let mut iteration: usize = 0;
-    //first round
+fn compute_coreness_queue(core: &mut Data) {
     for i in 0..core.graph.inmap.len() {
-        let new_estimate = compute_index(core, i);
-        if new_estimate < core.est[i] {
-            core.est[i] = new_estimate;
-            core.queues[0].push_back((i, new_estimate));
-            core.changed[i] = true;
-        }
+        core.queue.push_front(i);
     }
-    let mut continua = true;
-    while continua {
-        continua = false;
-        for i in 0..core.graph.inmap.len() {
-            let new_estimate = compute_index(core, i);
-            if new_estimate < core.est[i] {
-                core.est[i] = new_estimate;
-                core.queues[0].push_back((i, new_estimate));
-                core.changed[i] = true;
-                continua = true
+
+    while !core.queue.is_empty() {
+        if let Some(node) = core.queue.pop_front() {
+            core.changed[node] = false;
+            let old_estimate = core.est[node];
+            let new_estimate = compute_index(core, node);
+            if new_estimate < old_estimate {
+                for i in &core.graph.inmap[node] {
+                    if !core.changed[*i]
+                        && new_estimate < core.est[*i]
+                        && old_estimate >= core.est[*i]
+                    {
+                        core.queue.push_front(*i);
+                        core.changed[*i] = true;
+                    }
+                }
+                core.est[node] = new_estimate;
             }
         }
     }
 
     //loop
     println!();
-    for n in 0..core.count.len() {
-        println!("{} : {}", n + 1, core.est[n])
+    let lim = cmp::min(30, core.est.len());
+    for n in 0..lim {
+        println!("{} : {}", n, core.est[n])
     }
 }
 
+fn compute_coreness(core: &mut Data) {
+    let mut continua = true;
+    while continua {
+        continua = false;
+
+        for i in 0..core.graph.inmap.len() {
+            let new_estimate = compute_index(core, i);
+            if new_estimate < core.est[i] {
+                core.est[i] = new_estimate;
+                core.changed[i] = true;
+                continua = true;
+            }
+        }
+    }
+
+    //loop
+    println!();
+    let lim = cmp::min(30, core.est.len());
+    for n in 0..lim {
+        println!("{} : {}", n, core.est[n]);
+    }
+}
+
+fn write_to_file(vec: Vec<usize>, filename: &str) -> Result<(), std::io::Error> {
+    let mut file = File::create(filename)?;
+
+    for element in vec {
+        writeln!(file, "{}", element)?;
+    }
+
+    Ok(())
+}
+
 fn main() -> io::Result<()> {
-    let file_path = "p2p-Gnutella08.txt";
+    let file_path = "web-Stanford.txt";
 
     let mut graph = Graph::new();
 
@@ -174,7 +192,9 @@ fn main() -> io::Result<()> {
 
     let mut algorithm: Data = Data::new(graph);
 
-    compute_coreness(&mut algorithm);
+    compute_coreness_queue(&mut algorithm);
+
+    //let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
 
     Ok(())
 }

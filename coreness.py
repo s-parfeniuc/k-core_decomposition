@@ -16,7 +16,6 @@ def read_graph_from_file(file_path):
 
 def calculate_coreness(G):
     """Calcola la coreness di ogni nodo nel grafo"""
-    # Calcoliamo la coreness con il metodo k-core decomposition di NetworkX
     coreness = nx.core_number(G)
     return coreness
 
