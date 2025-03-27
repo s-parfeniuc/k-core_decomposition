@@ -48,7 +48,7 @@ struct Data {
     est: Vec<usize>,
     changed: Vec<bool>,
     count: Vec<usize>,
-    queue: VecDeque<usize>, //all'iterazione i uso i%2 come coda attuale e i+1%2 come coda per la prossima iterazione
+    queue: VecDeque<usize>,
 }
 
 impl Data {
@@ -118,13 +118,13 @@ fn compute_coreness_queue(core: &mut Data) {
             }
         }
     }
-
-    //loop
+    /*
     println!();
     let lim = cmp::min(30, core.est.len());
     for n in 0..lim {
         println!("{} : {}", n, core.est[n])
     }
+    */
 }
 
 fn compute_coreness(core: &mut Data) {
@@ -153,8 +153,8 @@ fn compute_coreness(core: &mut Data) {
 fn write_to_file(vec: Vec<usize>, filename: &str) -> Result<(), std::io::Error> {
     let mut file = File::create(filename)?;
 
-    for element in vec {
-        writeln!(file, "{}", element)?;
+    for n in 0..vec.len() {
+        writeln!(file, "{}", vec[n])?;
     }
 
     Ok(())
@@ -165,13 +165,11 @@ fn main() -> io::Result<()> {
 
     let mut graph = Graph::new();
 
-    // Open the file
     let file = File::open(file_path)?;
     let reader = io::BufReader::new(file);
 
-    // Iterate over each line in the file
     for line in reader.lines() {
-        let line = line?; // Get the line, and propagate any errors
+        let line = line?;
         if line.starts_with('#') {
             continue;
         }
@@ -194,7 +192,7 @@ fn main() -> io::Result<()> {
 
     compute_coreness_queue(&mut algorithm);
 
-    //let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
+    let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
 
     Ok(())
 }
