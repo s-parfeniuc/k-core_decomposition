@@ -6,7 +6,12 @@ use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::usize::MAX;
 /*
-
+Versione "multi-threaded" che usa gli iteratori paralleli di rayon. L'accesso ad ogni nodo è gestito
+da una mutex. Ogni nodo è composto dai propri dati locali e una lista di messaggi di tipo
+MessageMail, che è l'unico punto di interazione tra nodi diversi. MessageMail deve quindi essere
+un ReferenceCount (atomic) e acceduto tramite mutex, dato che ogni thread ha i riferimenti
+a tutti i MessageMail dei propri vicini (e non dei nodi stessi, in modo da non dover bloccare
+l'accesso a un intero nodo solo per scrivere un messaggio).
 */
 
 struct MessageMail {
@@ -211,6 +216,11 @@ impl Graph {
         Ok(())
     }
 
+    /*
+    Le iterazioni di compute_coreness sono divise in due fasi, la prima in cui ogni nodo aggiorna la propria coreness
+    utilizzando i dati locali che ha (stime dei vicini), la seconda in cui vengono inviati messaggi da parte dei nodi
+    che hanno cambiato la propria coreness durante la prima fase.
+     */
     pub fn compute_coreness(&mut self) {
         let mut cont = true;
 
@@ -249,9 +259,10 @@ fn thread_routine_index(node: Arc<Mutex<Node>>) -> bool {
 }
 
 // funzione eseguita dai thread in fase di invio messaggi
-// non è mai in possesso di 2 lock diverse: crea una copia locale dei riferimenti ai vicini e rilascia la lock del nodo
 fn thread_routine_message(node: Arc<Mutex<Node>>) -> usize {
-    // crea una copia locale di riferimenti ai vicini e del proprio messaggio da inviare
+    // prende le lock dei MessageMail dei vicini, non dei nodi stessi, così c'è contention solo per l'accesso
+    // alla lista di messaggi, non sono possibili deadlock perché si acquisisce una lock alla volta e si
+    // rilascia a fine operazione
     let mut locked_node = node.lock().unwrap();
     if locked_node.changed {
         locked_node.changed = false;
