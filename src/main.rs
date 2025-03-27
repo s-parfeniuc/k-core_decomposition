@@ -118,13 +118,6 @@ fn compute_coreness_queue(core: &mut Data) {
             }
         }
     }
-    /*
-    println!();
-    let lim = cmp::min(30, core.est.len());
-    for n in 0..lim {
-        println!("{} : {}", n, core.est[n])
-    }
-    */
 }
 
 fn compute_coreness(core: &mut Data) {
@@ -141,19 +134,15 @@ fn compute_coreness(core: &mut Data) {
             }
         }
     }
-
-    //loop
-    println!();
-    let lim = cmp::min(30, core.est.len());
-    for n in 0..lim {
-        println!("{} : {}", n, core.est[n]);
-    }
 }
 
 fn write_to_file(vec: Vec<usize>, filename: &str) -> Result<(), std::io::Error> {
     let mut file = File::create(filename)?;
-
-    for n in 0..vec.len() {
+    let mut start = 0;
+    if vec[0] == 0 {
+        start = 1;
+    }
+    for n in start..vec.len() {
         writeln!(file, "{}", vec[n])?;
     }
 
