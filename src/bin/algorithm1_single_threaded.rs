@@ -8,9 +8,9 @@ use std::usize::MAX;
 
 /*
 Questa versione singlethread simula il comportamento di host diversi che comunicano tra di loro tramite scambi di messaggi
-quando il proprio estimate cambia, ogni nodo ha una coda di messaggi della forma <nodo, nuovo_estimate>.
-Alla ricezione di un tale messaggio, che viene aggiunto alla lista tramite
-push dal nodo che ha cambiato il proprio estimate, il ricevitore calcola il nuovo estimate e in caso di aggiornamento
+in assenza di un canale broadcast. Ogni nodo ha una coda di messaggi della forma <nodo, nuovo_estimate>. Quando l'estimate
+di un nodo cambia, esso invierà un messaggio a tutti i propri vicini.
+Alla ricezione di un tale messaggio, il ricevitore calcola il nuovo estimate e in caso di aggiornamento
 invia a sua volta messaggi a tutti i propri vicini.
 */
 
