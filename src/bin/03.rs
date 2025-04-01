@@ -1,8 +1,10 @@
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::IntoParallelRefMutIterator;
+use rayon::iter::ParallelIterator;
 use std::cmp;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::usize::MAX;
 /*
@@ -144,23 +146,15 @@ impl Node {
             }
         }
     }
-
-    pub fn receive_message(&mut self, message: (usize, usize)) {
-        self.messages.lock().unwrap().messages.push_back(message);
-    }
 }
 
 struct Graph {
-    inmap: Vec<Arc<Mutex<Node>>>,
-    pool: rayon::ThreadPool,
+    inmap: Vec<Node>,
 }
 
 impl Graph {
     pub fn new() -> Self {
-        Graph {
-            inmap: Vec::new(),
-            pool: rayon::ThreadPoolBuilder::new().build().unwrap(),
-        }
+        Graph { inmap: Vec::new() }
     }
 
     pub fn add_edge(&mut self, i: usize, j: usize) {
@@ -168,24 +162,21 @@ impl Graph {
             let old_len = self.inmap.len();
             let new_len = cmp::max(i, j) + 1;
             for n in old_len..new_len {
-                self.inmap.push(Arc::new(Mutex::new(Node::new(n))));
+                self.inmap.push(Node::new(n));
             }
         }
-        self.inmap[i]
-            .lock()
-            .unwrap()
-            .add_neighbor(Arc::clone(&self.inmap[j].lock().unwrap().messages));
-        self.inmap[j]
-            .lock()
-            .unwrap()
-            .add_neighbor(Arc::clone(&self.inmap[i].lock().unwrap().messages));
+        let message_j = Arc::clone(&self.inmap[j].messages);
+        let message_i = Arc::clone(&self.inmap[i].messages);
+
+        self.inmap[i].add_neighbor(Arc::clone(&message_j));
+        self.inmap[j].add_neighbor(Arc::clone(&message_i));
     }
 
     // inizializza tutti i nodi con i valori opportuni, chiamata dopo aver aggiunto tutti i nodi
     pub fn init_graph(&mut self) {
-        for node in &self.inmap {
-            node.lock().unwrap().init();
-        }
+        self.inmap.par_iter_mut().for_each(|x| {
+            x.init();
+        });
     }
 
     // crea un grafo a partire da un file ignorando righe che iniziano con #
@@ -214,22 +205,59 @@ impl Graph {
     pub fn write_to_file(&self, filename: &str) -> std::io::Result<()> {
         let mut file = File::create(filename)?;
         for n in &self.inmap {
-            writeln!(file, "{}", n.lock().unwrap().coreness)?;
+            writeln!(file, "{}", n.coreness)?;
         }
 
         Ok(())
     }
 
-    /*
-    Le iterazioni di compute_coreness sono divise in due fasi, la prima in cui ogni nodo aggiorna la propria coreness
-    utilizzando i dati locali che ha (stime dei vicini), la seconda in cui vengono inviati messaggi da parte dei nodi
-    che hanno cambiato la propria coreness durante la prima fase.
-     */
+    pub fn compute_coreness_threadpool(&mut self) {
+        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
+        let cont_mutex = Mutex::new(true);
+        let guard = cont_mutex.lock().unwrap();
+        let mut cont = *guard;
+
+        drop(guard);
+        while cont {
+            let mut guard = cont_mutex.lock().unwrap();
+            *guard = false;
+            drop(guard);
+            pool.scope(|scope| {
+                for node in self.inmap.iter_mut() {
+                    scope.spawn(|_| {
+                        node.compute_index();
+                        if node.changed {
+                            *cont_mutex.lock().unwrap() = true;
+                        }
+                    });
+                }
+            });
+            pool.scope(|scope| {
+                for node in self.inmap.iter_mut() {
+                    if node.changed {
+                        node.changed = false;
+                        scope.spawn(|_| {
+                            for neighbor in node.neighbors.iter_mut() {
+                                neighbor
+                                    .lock()
+                                    .unwrap()
+                                    .messages
+                                    .push_back((node.id, node.coreness));
+                            }
+                        });
+                    }
+                }
+            });
+            let guard = cont_mutex.lock().unwrap();
+            cont = *guard;
+            drop(guard);
+        }
+    }
+
     pub fn compute_coreness(&mut self) {
         let mut cont = true;
 
         let mut rounds = 0;
-        let mut n_messages = 0;
 
         while cont {
             rounds += 1;
@@ -237,62 +265,36 @@ impl Graph {
             // computazione in parallelo dei coreness dei nodi
             cont = self
                 .inmap
-                .par_iter() // itera in modo parallelo il vettore
-                .map(|x| thread_routine_index(&x.clone())) // applica la funzione thread_routine_index a ogni elemento
+                .par_iter_mut() // itera in modo parallelo il vettore
+                .map(|x| thread_routine_index(x)) // applica la funzione thread_routine_index a ogni elemento
                 .reduce(|| false, |a, b| a || b); // or tra tutti i risultati: se almeno uno è stato cambiato si continua
 
             // invio messaggi a vicini
-            n_messages += self
-                .inmap
-                .par_iter() // itera in modo parallelo il vettore
-                .map(|x| thread_routine_message(x.clone())) //applica la funzione thread_routine_message a ogni
-                .reduce(|| 0, |a, b| a + b); // sommatoria del numero di messaggi inviati in questa iterazione
+            self.inmap
+                .par_iter_mut() // itera in modo parallelo il vettore
+                .for_each(|x| thread_routine_message(x)) //applica la funzione thread_routine_message a ogni
         }
-        println!(
-            "Algoritmo terminato dopo {} iterazioni, numero di messaggi scambiati: {}",
-            rounds, n_messages
-        );
-    }
-
-    pub fn compute_coreness_threadpool(&mut self) {
-        let mut cont = true;
-
-        for _i in 0..50 {
-            for node in &self.inmap {
-                self.pool.install(|| thread_routine_index(node));
-            }
-
-            for node in &self.inmap {}
-        }
+        println!("Algoritmo terminato dopo {} iterazioni", rounds);
     }
 }
 
-fn pool_routine_index() {}
-
 // funzione eseguita dai thread in fase di computazione coreness su ogni nodo
-fn thread_routine_index(node: &Arc<Mutex<Node>>) -> bool {
-    let mut locked_node = node.lock().unwrap();
-    locked_node.compute_index();
-    return locked_node.changed;
+fn thread_routine_index(node: &mut Node) -> bool {
+    node.compute_index();
+    return node.changed;
 }
 
 // funzione eseguita dai thread in fase di invio messaggi
-fn thread_routine_message(node: Arc<Mutex<Node>>) -> usize {
+fn thread_routine_message(node: &mut Node) {
     // prende le lock dei MessageMail dei vicini, non dei nodi stessi, così c'è contention solo per l'accesso
     // alla lista di messaggi, non sono possibili deadlock perché si acquisisce una lock alla volta e si
     // rilascia a fine operazione
-    let mut locked_node = node.lock().unwrap();
-    if locked_node.changed {
-        locked_node.changed = false;
-        for neighbor in &locked_node.neighbors {
-            neighbor
-                .lock()
-                .unwrap()
-                .push((locked_node.id, locked_node.coreness));
+    if node.changed {
+        node.changed = false;
+        for neighbor in &node.neighbors {
+            neighbor.lock().unwrap().push((node.id, node.coreness));
         }
-        return locked_node.neighbors.len();
     }
-    return 0;
 }
 
 fn main() -> std::io::Result<()> {
@@ -314,7 +316,7 @@ fn main() -> std::io::Result<()> {
     graph.init_graph();
 
     // algoritmo di calcolo coreness dei nodi
-    graph.compute_coreness();
+    graph.compute_coreness_threadpool();
 
     // scrittura valori di coreness dei nodi
     graph.write_to_file(&out_file)?;
