@@ -38,7 +38,7 @@ def main(input_file, output_file):
 if __name__ == "__main__":
     if len(sys.argv)== 2:
         input_file : str = sys.argv[1]
-        output_file = f"./tests/{input_file.split('.')[0]}_coreness.txt"
+        output_file = sys.argv[2]
     else:
         sys.exit(1)
     main(input_file, output_file)

@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::rc::Rc;
+use std::time::Instant;
 use std::usize::MAX;
 
 /*
@@ -148,6 +149,9 @@ impl Graph {
                 self.inmap.push(Rc::new(RefCell::new(Node::new(n))));
             }
         }
+        if i == j {
+            return;
+        }
         self.inmap[i]
             .borrow_mut()
             .add_neighbor(Rc::clone(&self.inmap[j]));
@@ -197,10 +201,12 @@ impl Graph {
         Ok(())
     }
 
-    pub fn compute_coreness(&mut self) {
+    pub fn compute_coreness(&mut self) -> usize {
         let mut cont = true;
+        let mut iter = 0;
         while cont {
             cont = false;
+            iter += 1;
             for node in &self.inmap {
                 let old_coreness = node.borrow().coreness;
                 if old_coreness != node.borrow_mut().compute_index() {
@@ -208,32 +214,10 @@ impl Graph {
                 }
             }
         }
+        iter
     }
 }
 
-fn debug_print(graph: Graph) {
-    for node in &graph.inmap {
-        println!(
-            "============={}, coreness: {}: neighbors:=============",
-            node.borrow().id,
-            node.borrow().coreness
-        );
-        let nod = &node.borrow();
-        for neighbor in &nod.neighbors {
-            println!(
-                "id {}: estimate: {}",
-                neighbor.borrow().id,
-                node.borrow().est.get(&neighbor.borrow().id).unwrap()
-            );
-        }
-        println!("messages: ");
-        for message in &nod.messages {
-            println!("estimate {} from {}", message.1, message.0);
-        }
-        println!();
-        println!("\n\n");
-    }
-}
 fn main() -> std::io::Result<()> {
     // gestione argomenti passati da linea di comando: in_file (file da parsare) e out_file (file su cui scrivere la coreness dei nodi)
     let args: Vec<String> = std::env::args().collect();
@@ -246,17 +230,78 @@ fn main() -> std::io::Result<()> {
 
     let mut graph = Graph::new();
 
+    let mut start = Instant::now();
+
     // crea il grafo a partire dal file
     graph.parse_file(in_file)?;
+    println!("Per parsare il file: {:?}", start.elapsed());
 
     // inizializza le variabili necessarie per l'algoritmo
+    start = Instant::now();
     graph.init_graph();
+    println!("Per inizializzare i nodi: {:?}", start.elapsed());
 
     // algoritmo di calcolo coreness dei nodi
+    start = Instant::now();
     graph.compute_coreness();
+    println!(
+        "Per calcolare coreness single-thread: {:?}",
+        start.elapsed()
+    );
 
     // scrittura valori di coreness dei nodi
     graph.write_to_file(&out_file)?;
 
     Ok(())
+}
+
+#[test]
+fn test() {
+    use std::fs::OpenOptions;
+    let graphs: [&str; 10] = [
+        "web-Stanford",
+        "web-BerkStan",
+        "web-Google",
+        "web-NotreDame",
+        "wiki-Talk",
+        "soc-pokec-relationships",
+        "soc-LiveJournal1",
+        "roadNet-CA",
+        "roadNet-PA",
+        "roadNet-TX",
+    ];
+
+    let data_file = "./data/progress_data.csv";
+
+    // apro file in append mode
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(data_file)
+        .unwrap();
+
+    for graph_name in graphs {
+        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+        let mut graph = Graph::new();
+
+        let _m = graph.parse_file(&file_name);
+
+        graph.init_graph();
+        let start = Instant::now();
+        let iter = graph.compute_coreness();
+
+        let data = "single_threaded".to_owned()
+            + ","
+            + graph_name
+            + ","
+            + format!("{:?}", start.elapsed()).as_str()
+            + ","
+            + "0"
+            + ","
+            + 1.to_string().as_str()
+            + ","
+            + iter.to_string().as_str()
+            + "\n";
+        let _n = file.write_all(data.as_bytes());
+    }
 }

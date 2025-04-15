@@ -1,1 +1,7 @@
 /target
+/comments.txt
+/profile.json.gz
+/data.txt
+/graphs
+/make_graph.py
+/make_graph1.py

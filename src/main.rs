@@ -1,8 +1,10 @@
+#![allow(dead_code)]
 use std::cmp;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+use std::time::Instant;
 
 struct Graph {
     inmap: Vec<Vec<usize>>,
@@ -22,10 +24,6 @@ impl Graph {
         self.inmap[i].push(j);
         self.inmap[j].push(i);
         Ok(())
-    }
-
-    pub fn debug_print(&mut self) {
-        println!("Number of nodes: {}", self.inmap.len());
     }
 
     pub fn no_duplicates(&mut self) {
@@ -150,13 +148,14 @@ fn write_to_file(vec: Vec<usize>, filename: &str) -> Result<(), std::io::Error> 
 }
 
 fn main() -> io::Result<()> {
-    let file_path = "web-Stanford.txt";
+    let file_path = "./graphs/soc-pokec-relationships/soc-pokec-relationships.txt";
 
     let mut graph = Graph::new();
 
     let file = File::open(file_path)?;
     let reader = io::BufReader::new(file);
 
+    let mut start = Instant::now();
     for line in reader.lines() {
         let line = line?;
         if line.starts_with('#') {
@@ -173,15 +172,19 @@ fn main() -> io::Result<()> {
             println!("Skipping invalid line: {}", line);
         }
     }
-
+    println!("Per parsare il file: {:?}", start.elapsed());
+    start = Instant::now();
     graph.no_duplicates();
-    graph.debug_print();
 
+    println!("Per inizializzare i nodi: {:?}", start.elapsed());
+    start = Instant::now();
     let mut algorithm: Data = Data::new(graph);
 
     compute_coreness_queue(&mut algorithm);
 
-    let _ = write_to_file(algorithm.est, "./tests/web-Stanford_core.txt");
+    println!("Per calcolare coreness version01: {:?}", start.elapsed());
+
+    let _ = write_to_file(algorithm.est, "./graphs/soc-pokec-relationships/coree.txt");
 
     Ok(())
 }

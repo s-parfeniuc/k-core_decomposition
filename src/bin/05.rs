@@ -2,7 +2,7 @@
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use std::cmp;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::sync::Barrier;
@@ -12,23 +12,42 @@ use std::thread;
 use std::time::Instant;
 use std::usize::MAX;
 /*
-Versione multi-threaded che usa gli iteratori paralleli di rayon, il ThreadPool di rayon e i
-thread nativi di Rust. Ogni nodo è composto dai propri dati locali e una lista di messaggi di tipo
-MessageMail, che è l'unico punto di interazione tra nodi diversi. MessageMail deve quindi essere
-un ReferenceCount (atomic) e acceduto tramite mutex, dato che ogni thread ha i riferimenti
-a tutti i MessageMail dei propri vicini (e non dei nodi stessi, in modo da non dover bloccare
-l'accesso a un intero nodo solo per scrivere un messaggio).
+Ottimizzazione: invio di messaggi solo se il proprio estimate è minore di quello a cui stiamo inviando il messaggio.
 */
 
+struct Estimates {
+    est: Vec<(usize, usize)>,
+}
+impl Estimates {
+    pub fn new() -> Self {
+        Self { est: Vec::new() }
+    }
+
+    pub fn push(&mut self, value: (usize, usize)) {
+        self.est.push(value);
+    }
+
+    pub fn init(&mut self) {
+        self.est.sort_by_key(|&(a, _b)| a);
+    }
+
+    pub fn insert(&mut self, key: usize, value: usize) {
+        let index = self.est.binary_search_by_key(&key, |&(a, _b)| a).unwrap();
+        self.est[index].1 = value;
+    }
+
+    pub fn get(&mut self, key: usize) -> usize {
+        let index = self.est.binary_search_by_key(&key, |&(a, _b)| a).unwrap();
+        self.est[index].1
+    }
+}
 struct MessageMail {
-    id: usize,
     messages: VecDeque<(usize, usize)>,
 }
 
 impl MessageMail {
-    pub fn new(n: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            id: n,
             messages: VecDeque::new(),
         }
     }
@@ -38,7 +57,7 @@ impl MessageMail {
     }
 
     pub fn pop(&mut self) -> Option<(usize, usize)> {
-        self.messages.pop_back()
+        self.messages.pop_front()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -49,10 +68,10 @@ impl MessageMail {
 struct Node {
     id: usize,
     coreness: usize,
-    est: HashMap<usize, usize>, // est[k] è l'estimate locale della coreness del vicino che ha id k,
-    neighbors: Vec<Arc<Mutex<MessageMail>>>, // lista di Message_Mail dei vicini,
+    est: Estimates, // est[k] è l'estimate locale della coreness del vicino che ha id k,
+    neighbors: Vec<(usize, Arc<Mutex<MessageMail>>)>, // lista di Message_Mail dei vicini,
     messages: Arc<Mutex<MessageMail>>, // queue di messaggi
-    changed: bool,              // indica se è stato cambiato dall'ultima fase di invio messaggi
+    changed: bool,  // indica se è stato cambiato dall'ultima fase di invio messaggi
 }
 
 impl Node {
@@ -60,16 +79,16 @@ impl Node {
         Node {
             id: n,
             coreness: MAX,
-            est: HashMap::new(),
+            est: Estimates::new(),
             neighbors: Vec::new(),
-            messages: Arc::new(Mutex::new(MessageMail::new(n))),
+            messages: Arc::new(Mutex::new(MessageMail::new())),
             changed: true,
         }
     }
 
-    pub fn add_neighbor(&mut self, node: Arc<Mutex<MessageMail>>) {
+    pub fn add_neighbor(&mut self, node: Arc<Mutex<MessageMail>>, id: usize) {
         // aggiunge un nuovo vicino
-        self.neighbors.push(node);
+        self.neighbors.push((id, node));
     }
 
     pub fn init(&mut self) {
@@ -78,15 +97,16 @@ impl Node {
 
         // usa un HashSet per vedere se gli elementi sono già stati "visti"
         self.neighbors.retain(|x| {
-            let id = x.lock().unwrap().id;
+            let id = x.0;
             seen.insert(id) // il metodo restituisce true se l'id non è stato ancora inserito
         });
 
         // inizializza gli estimates dei vicini a "infinito"
+        self.est.est.clear();
         for neighbor in &self.neighbors {
-            self.est.insert(neighbor.lock().unwrap().id, MAX);
+            self.est.push((neighbor.0, MAX));
         }
-
+        self.est.init();
         // inizializza la propria coreness con la lunghezza della lista di adiacenza
         self.coreness = self.neighbors.len();
 
@@ -104,12 +124,9 @@ impl Node {
         // controllo la lista di messaggi e aggiorno gli estimates locali
         while !messages.is_empty() {
             let message = messages.pop().unwrap();
-            if message.1 < *self.est.get(&message.0).unwrap() {
-                self.est.insert(message.0, message.1);
-            }
+            self.est.insert(message.0, message.1);
         }
         drop(messages);
-
         let core = self.coreness;
 
         if core == 0 {
@@ -119,8 +136,8 @@ impl Node {
         let mut count: Vec<usize> = Vec::with_capacity(core + 1);
         count.resize(core + 1, 0);
 
-        for neighbor in &self.est {
-            let k = cmp::min(core, *neighbor.1);
+        for neighbor in &self.est.est {
+            let k = cmp::min(core, neighbor.1);
             count[k] += 1;
         }
 
@@ -144,11 +161,21 @@ impl Node {
         if self.changed {
             self.changed = false;
             for neighbor in &mut self.neighbors {
-                neighbor
-                    .lock()
-                    .unwrap()
-                    .messages
-                    .push_back((self.id, self.coreness));
+                if self.coreness < self.est.get(neighbor.0) {
+                    /*println!(
+                        "Sono {}: mando a {}(estimate {}) la mia nuova coreness {}",
+                        self.id,
+                        neighbor.0,
+                        self.est.get(neighbor.0),
+                        self.coreness
+                    );*/
+                    neighbor
+                        .1
+                        .lock()
+                        .unwrap()
+                        .messages
+                        .push_back((self.id, self.coreness));
+                }
             }
         }
     }
@@ -177,8 +204,8 @@ impl Graph {
         let message_j = Arc::clone(&self.inmap[j].messages);
         let message_i = Arc::clone(&self.inmap[i].messages);
 
-        self.inmap[i].add_neighbor(Arc::clone(&message_j));
-        self.inmap[j].add_neighbor(Arc::clone(&message_i));
+        self.inmap[i].add_neighbor(Arc::clone(&message_j), j);
+        self.inmap[j].add_neighbor(Arc::clone(&message_i), i);
     }
 
     // inizializza tutti i nodi con i valori opportuni, chiamata dopo aver aggiunto tutti i nodi
@@ -251,22 +278,13 @@ impl Graph {
                         for node in chunk.iter_mut() {
                             node.compute_index();
                             changed |= node.changed;
+                            node.send_messages();
                         }
 
                         if changed {
                             let mut guard = cont_mutex.write().unwrap();
                             *guard = true;
                             drop(guard);
-                        }
-                    });
-                }
-            });
-
-            pool.scope(|scope| {
-                for chunk in self.inmap.chunks_mut(*chunk_size) {
-                    scope.spawn(|_| {
-                        for node in chunk.iter_mut() {
-                            node.send_messages();
                         }
                     });
                 }
@@ -283,6 +301,7 @@ impl Graph {
         let mut cont = true;
 
         let mut rounds = 0;
+
         rayon::ThreadPoolBuilder::new()
             .num_threads(*num_threads)
             .build()
@@ -295,13 +314,12 @@ impl Graph {
                     cont = self
                         .inmap
                         .par_iter_mut() // itera in modo parallelo il vettore
-                        .map(|x| thread_routine_index(x)) // applica la funzione thread_routine_index a ogni elemento
+                        .map(|x| {
+                            let changed = thread_routine_index(x);
+                            thread_routine_message(x);
+                            return changed;
+                        }) // applica la funzione thread_routine_index a ogni elemento
                         .reduce(|| false, |a, b| a || b); // or tra tutti i risultati: se almeno uno è stato cambiato si continua
-
-                    // invio messaggi a vicini
-                    self.inmap
-                        .par_iter_mut() // itera in modo parallelo il vettore
-                        .for_each(|x| thread_routine_message(x)) //applica la funzione thread_routine_message a ogni
                 }
             });
         return rounds;
@@ -342,20 +360,14 @@ impl Graph {
                 let mut cont_guard = cont_mutex.lock().unwrap();
                 *cont_guard = false;
                 drop(cont_guard);
-                // prima fase
+                barrier.wait();
+                // calcolo coreness + invio messaggi
 
                 barrier.wait();
                 let mut index_guard = index.lock().unwrap();
                 *index_guard = 0;
                 drop(index_guard);
-                barrier.wait();
 
-                // seconda fase
-
-                barrier.wait();
-                let mut index_guard = index.lock().unwrap();
-                *index_guard = 0;
-                drop(index_guard);
                 let cont_guard = cont_mutex.lock().unwrap();
                 continua = *cont_guard;
                 drop(cont_guard);
@@ -375,26 +387,15 @@ fn thread_routine(
     let mut continua = true;
     let index_max = node_list.len();
     while continua {
+        barrier.wait();
         continua = false;
 
-        // prima fase, calcolo coreness
+        // unica fase, calcolo coreness e invio messaggi
         let mut i = get_and_increment(&index);
         while i < index_max {
             for node in node_list[i].lock().unwrap().iter_mut() {
                 node.compute_index();
                 continua |= node.changed;
-            }
-            i = get_and_increment(&index);
-        }
-        // fine prima fase, sincronizzo con altri thread
-        barrier.wait();
-        // aspetto che il thread master azzeri l'index
-        barrier.wait();
-
-        // seconda fase, invio messaggi
-        let mut i = get_and_increment(&index);
-        while i < index_max {
-            for node in node_list[i].lock().unwrap().iter_mut() {
                 node.send_messages();
             }
             i = get_and_increment(&index);
@@ -428,12 +429,7 @@ fn thread_routine_message(node: &mut Node) {
     // prende le lock dei MessageMail dei vicini, non dei nodi stessi, così c'è contention solo per l'accesso
     // alla lista di messaggi, non sono possibili deadlock perché si acquisisce una lock alla volta e si
     // rilascia a fine operazione
-    if node.changed {
-        node.changed = false;
-        for neighbor in &node.neighbors {
-            neighbor.lock().unwrap().push((node.id, node.coreness));
-        }
-    }
+    node.send_messages();
 }
 
 fn main() -> std::io::Result<()> {
@@ -529,7 +525,7 @@ fn test() {
             let start = Instant::now();
             let iter = graph.compute_coreness_iterator(&num_threads, &0);
 
-            let data = "hashmap_iterator".to_owned()
+            let data = "onephase_optimized_iterator".to_owned()
                 + ","
                 + graph_name
                 + ","
@@ -557,7 +553,7 @@ fn test() {
                 let start = Instant::now();
                 let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
 
-                let data = "hashmap_threadpool".to_owned()
+                let data = "onephase_optimized_threadpool".to_owned()
                     + ","
                     + graph_name
                     + ","
@@ -586,7 +582,7 @@ fn test() {
                 let start = Instant::now();
                 let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
 
-                let data = "hashmap_threads".to_owned()
+                let data = "onephase_optimized_threads".to_owned()
                     + ","
                     + graph_name
                     + ","

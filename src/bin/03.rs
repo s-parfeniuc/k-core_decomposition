@@ -1,21 +1,47 @@
+#![allow(dead_code)]
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use std::cmp;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
-use std::sync::atomic::AtomicBool;
+use std::sync::Barrier;
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Instant;
 use std::usize::MAX;
 /*
-Versione "multi-threaded" che usa gli iteratori paralleli di rayon. L'accesso ad ogni nodo è gestito
-da una mutex. Ogni nodo è composto dai propri dati locali e una lista di messaggi di tipo
-MessageMail, che è l'unico punto di interazione tra nodi diversi. MessageMail deve quindi essere
-un ReferenceCount (atomic) e acceduto tramite mutex, dato che ogni thread ha i riferimenti
-a tutti i MessageMail dei propri vicini (e non dei nodi stessi, in modo da non dover bloccare
-l'accesso a un intero nodo solo per scrivere un messaggio).
+Al posto di usare un hashmap per salvare i valori degli estimates dei vicini viene usato un vettore ordinato su cui fare binary_search, dato che
+al caso medio l'accesso a un vettore ordinato conoscendo la chiave è più veloce rispetto all'accesso ad un hashmap.
 */
 
+struct Estimates {
+    est: Vec<(usize, usize)>,
+}
+impl Estimates {
+    pub fn new() -> Self {
+        Self { est: Vec::new() }
+    }
+
+    pub fn push(&mut self, value: (usize, usize)) {
+        self.est.push(value);
+    }
+
+    pub fn init(&mut self) {
+        self.est.sort_by_key(|&(a, _b)| a);
+    }
+
+    pub fn insert(&mut self, key: usize, value: usize) {
+        let index = self.est.binary_search_by_key(&key, |&(a, _b)| a).unwrap();
+        self.est[index].1 = value;
+    }
+
+    pub fn get(&mut self, key: usize) -> usize {
+        let index = self.est.binary_search_by_key(&key, |&(a, _b)| a).unwrap();
+        self.est[index].1
+    }
+}
 struct MessageMail {
     id: usize,
     messages: VecDeque<(usize, usize)>,
@@ -45,10 +71,10 @@ impl MessageMail {
 struct Node {
     id: usize,
     coreness: usize,
-    est: HashMap<usize, usize>, // est[k] è l'estimate locale della coreness del vicino che ha id k,
+    est: Estimates, // est[k] è l'estimate locale della coreness del vicino che ha id k,
     neighbors: Vec<Arc<Mutex<MessageMail>>>, // lista di Message_Mail dei vicini,
     messages: Arc<Mutex<MessageMail>>, // queue di messaggi
-    changed: bool,              // indica se è stato cambiato dall'ultima fase di invio messaggi
+    changed: bool,  // indica se è stato cambiato dall'ultima fase di invio messaggi
 }
 
 impl Node {
@@ -56,7 +82,7 @@ impl Node {
         Node {
             id: n,
             coreness: MAX,
-            est: HashMap::new(),
+            est: Estimates::new(),
             neighbors: Vec::new(),
             messages: Arc::new(Mutex::new(MessageMail::new(n))),
             changed: true,
@@ -79,14 +105,16 @@ impl Node {
         });
 
         // inizializza gli estimates dei vicini a "infinito"
+        self.est.est.clear();
         for neighbor in &self.neighbors {
-            self.est.insert(neighbor.lock().unwrap().id, MAX);
+            self.est.push((neighbor.lock().unwrap().id, MAX));
         }
-
+        self.est.init();
         // inizializza la propria coreness con la lunghezza della lista di adiacenza
         self.coreness = self.neighbors.len();
 
         // invia un messaggio a tutti i vicini
+        self.changed = true;
         self.send_messages();
     }
 
@@ -99,11 +127,11 @@ impl Node {
         // controllo la lista di messaggi e aggiorno gli estimates locali
         while !messages.is_empty() {
             let message = messages.pop().unwrap();
-            if message.1 < *self.est.get(&message.0).unwrap() {
+            if message.1 < self.est.get(message.0) {
                 self.est.insert(message.0, message.1);
             }
         }
-
+        drop(messages);
         let core = self.coreness;
 
         if core == 0 {
@@ -113,8 +141,8 @@ impl Node {
         let mut count: Vec<usize> = Vec::with_capacity(core + 1);
         count.resize(core + 1, 0);
 
-        for neighbor in &self.est {
-            let k = cmp::min(core, *neighbor.1);
+        for neighbor in &self.est.est {
+            let k = cmp::min(core, neighbor.1);
             count[k] += 1;
         }
 
@@ -165,6 +193,10 @@ impl Graph {
                 self.inmap.push(Node::new(n));
             }
         }
+
+        if i == j {
+            return;
+        }
         let message_j = Arc::clone(&self.inmap[j].messages);
         let message_i = Arc::clone(&self.inmap[i].messages);
 
@@ -202,6 +234,7 @@ impl Graph {
         Ok(())
     }
 
+    // metodo che scrive su un file il valore di coreness di ciascun nodo
     pub fn write_to_file(&self, filename: &str) -> std::io::Result<()> {
         let mut file = File::create(filename)?;
         for n in &self.inmap {
@@ -211,73 +244,202 @@ impl Graph {
         Ok(())
     }
 
-    pub fn compute_coreness_threadpool(&mut self) {
-        let pool = rayon::ThreadPoolBuilder::new().build().unwrap();
-        let cont_mutex = Mutex::new(true);
-        let guard = cont_mutex.lock().unwrap();
-        let mut cont = *guard;
+    // calcolo coreness utilizzando threadpool, dato che creando un nuovo "task" per ogni singolo nodo
+    // da elaborare introduce troppo overhead, si usano gli iteratori su chunk
+    pub fn compute_coreness_threadpool(
+        &mut self,
+        num_threads: &usize,
+        batch_size: &usize,
+    ) -> usize {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(*num_threads)
+            .build()
+            .unwrap();
+        let cont_mutex = RwLock::new(true);
+        let mut cont = true;
 
-        drop(guard);
+        let chunk_size = batch_size;
+
+        let mut iter: usize = 0;
+
         while cont {
-            let mut guard = cont_mutex.lock().unwrap();
+            iter += 1;
+            let mut guard = cont_mutex.write().unwrap();
             *guard = false;
             drop(guard);
             pool.scope(|scope| {
-                for node in self.inmap.iter_mut() {
+                for chunk in self.inmap.chunks_mut(*chunk_size) {
                     scope.spawn(|_| {
-                        node.compute_index();
-                        if node.changed {
-                            *cont_mutex.lock().unwrap() = true;
+                        let mut changed = false;
+                        for node in chunk.iter_mut() {
+                            node.compute_index();
+                            changed |= node.changed;
+                        }
+
+                        if changed {
+                            let mut guard = cont_mutex.write().unwrap();
+                            *guard = true;
+                            drop(guard);
                         }
                     });
                 }
             });
+
             pool.scope(|scope| {
-                for node in self.inmap.iter_mut() {
-                    if node.changed {
-                        node.changed = false;
-                        scope.spawn(|_| {
-                            for neighbor in node.neighbors.iter_mut() {
-                                neighbor
-                                    .lock()
-                                    .unwrap()
-                                    .messages
-                                    .push_back((node.id, node.coreness));
-                            }
-                        });
-                    }
+                for chunk in self.inmap.chunks_mut(*chunk_size) {
+                    scope.spawn(|_| {
+                        for node in chunk.iter_mut() {
+                            node.send_messages();
+                        }
+                    });
                 }
             });
-            let guard = cont_mutex.lock().unwrap();
+
+            let guard = cont_mutex.read().unwrap();
             cont = *guard;
             drop(guard);
         }
+        return iter;
     }
 
-    pub fn compute_coreness(&mut self) {
+    pub fn compute_coreness_iterator(&mut self, num_threads: &usize, _batch_size: &usize) -> usize {
         let mut cont = true;
 
         let mut rounds = 0;
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(*num_threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                while cont {
+                    rounds += 1;
 
-        while cont {
-            rounds += 1;
+                    // computazione in parallelo dei coreness dei nodi
+                    cont = self
+                        .inmap
+                        .par_iter_mut() // itera in modo parallelo il vettore
+                        .map(|x| thread_routine_index(x)) // applica la funzione thread_routine_index a ogni elemento
+                        .reduce(|| false, |a, b| a || b); // or tra tutti i risultati: se almeno uno è stato cambiato si continua
 
-            // computazione in parallelo dei coreness dei nodi
-            cont = self
-                .inmap
-                .par_iter_mut() // itera in modo parallelo il vettore
-                .map(|x| thread_routine_index(x)) // applica la funzione thread_routine_index a ogni elemento
-                .reduce(|| false, |a, b| a || b); // or tra tutti i risultati: se almeno uno è stato cambiato si continua
+                    // invio messaggi a vicini
+                    self.inmap
+                        .par_iter_mut() // itera in modo parallelo il vettore
+                        .for_each(|x| thread_routine_message(x)) //applica la funzione thread_routine_message a ogni
+                }
+            });
+        return rounds;
+    }
 
-            // invio messaggi a vicini
-            self.inmap
-                .par_iter_mut() // itera in modo parallelo il vettore
-                .for_each(|x| thread_routine_message(x)) //applica la funzione thread_routine_message a ogni
-        }
-        println!("Algoritmo terminato dopo {} iterazioni", rounds);
+    pub fn compute_coreness_threads(&mut self, num_threads: &usize, chunk_size: &usize) -> usize {
+        let mut iter: usize = 0;
+        thread::scope(|scope| {
+            let cont_mutex: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
+            let barrier = Arc::new(Barrier::new(*num_threads + 1));
+            let mut threads = Vec::with_capacity(*num_threads);
+
+            let index: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+
+            let mut nodes: Vec<Mutex<&mut [Node]>> = Vec::new();
+
+            for chunk in self.inmap.chunks_mut(*chunk_size) {
+                nodes.push(Mutex::new(chunk));
+            }
+
+            let node_list = Arc::new(nodes);
+
+            for _i in 0..*num_threads {
+                let cont_clone = Arc::clone(&cont_mutex);
+                let barrier_clone = Arc::clone(&barrier);
+                let index_clone = Arc::clone(&index);
+                let node_list_clone = Arc::clone(&node_list);
+
+                threads.push(scope.spawn(move || {
+                    thread_routine(cont_clone, barrier_clone, index_clone, node_list_clone);
+                }));
+            }
+
+            let mut continua = true;
+
+            while continua {
+                iter += 1;
+                let mut cont_guard = cont_mutex.lock().unwrap();
+                *cont_guard = false;
+                drop(cont_guard);
+                // prima fase
+
+                barrier.wait();
+                let mut index_guard = index.lock().unwrap();
+                *index_guard = 0;
+                drop(index_guard);
+                barrier.wait();
+
+                // seconda fase
+
+                barrier.wait();
+                let mut index_guard = index.lock().unwrap();
+                *index_guard = 0;
+                drop(index_guard);
+                let cont_guard = cont_mutex.lock().unwrap();
+                continua = *cont_guard;
+                drop(cont_guard);
+                barrier.wait();
+            }
+        });
+        return iter;
     }
 }
 
+fn thread_routine(
+    cont: Arc<Mutex<bool>>,
+    barrier: Arc<Barrier>,
+    index: Arc<Mutex<usize>>,
+    node_list: Arc<Vec<Mutex<&mut [Node]>>>,
+) {
+    let mut continua = true;
+    let index_max = node_list.len();
+    while continua {
+        continua = false;
+
+        // prima fase, calcolo coreness
+        let mut i = get_and_increment(&index);
+        while i < index_max {
+            for node in node_list[i].lock().unwrap().iter_mut() {
+                node.compute_index();
+                continua |= node.changed;
+            }
+            i = get_and_increment(&index);
+        }
+        // fine prima fase, sincronizzo con altri thread
+        barrier.wait();
+        // aspetto che il thread master azzeri l'index
+        barrier.wait();
+
+        // seconda fase, invio messaggi
+        let mut i = get_and_increment(&index);
+        while i < index_max {
+            for node in node_list[i].lock().unwrap().iter_mut() {
+                node.send_messages();
+            }
+            i = get_and_increment(&index);
+        }
+
+        let mut cont_guard = cont.lock().unwrap();
+        *cont_guard |= continua;
+        drop(cont_guard);
+        barrier.wait();
+        let cont_guard = cont.lock().unwrap();
+        continua = *cont_guard;
+        drop(cont_guard);
+        barrier.wait();
+    }
+}
+
+fn get_and_increment(index: &Arc<Mutex<usize>>) -> usize {
+    let mut index_guard = index.lock().unwrap();
+    let i = *index_guard;
+    *index_guard += 1;
+    return i;
+}
 // funzione eseguita dai thread in fase di computazione coreness su ogni nodo
 fn thread_routine_index(node: &mut Node) -> bool {
     node.compute_index();
@@ -309,17 +471,158 @@ fn main() -> std::io::Result<()> {
 
     let mut graph = Graph::new();
 
+    let mut start = Instant::now();
+
     // crea il grafo a partire dal file
     graph.parse_file(in_file)?;
+    println!("Per parsare il file: {:?}", start.elapsed());
 
     // inizializza le variabili necessarie per l'algoritmo
+    start = Instant::now();
+    graph.init_graph();
+    println!("Per inizializzare i nodi: {:?}", start.elapsed());
+
+    // algoritmo di calcolo coreness dei nodi con parallel iterator
+    start = Instant::now();
+    graph.compute_coreness_iterator(&6, &512);
+    println!(
+        "Per calcolare coreness con parallel iterator: {:?}",
+        start.elapsed()
+    );
+
     graph.init_graph();
 
-    // algoritmo di calcolo coreness dei nodi
-    graph.compute_coreness_threadpool();
+    // calcolo coreness tramite threadpool
+    start = Instant::now();
+    graph.compute_coreness_threadpool(&6, &512);
+    println!(
+        "Per calcolare coreness con threadpool: {:?}",
+        start.elapsed()
+    );
+
+    // calcolo coreness tramite threads
+    graph.init_graph();
+    start = Instant::now();
+    graph.compute_coreness_threads(&6, &512);
+    println!("Per calcolare coreness con threads: {:?}", start.elapsed());
 
     // scrittura valori di coreness dei nodi
     graph.write_to_file(&out_file)?;
 
     Ok(())
+}
+
+#[test]
+fn test() {
+    use std::fs::OpenOptions;
+    let graphs: [&str; 10] = [
+        "web-Stanford",
+        "web-BerkStan",
+        "web-Google",
+        "web-NotreDame",
+        "wiki-Talk",
+        "soc-pokec-relationships",
+        "soc-LiveJournal1",
+        "roadNet-CA",
+        "roadNet-PA",
+        "roadNet-TX",
+    ];
+
+    let data_file = "./data/progress_data.csv";
+
+    let batch_sizes: [usize; 1] = [256];
+
+    let nums_threads: [usize; 1] = [6];
+
+    // apro file in append mode
+    let mut file = OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(data_file)
+        .unwrap();
+
+    for graph_name in graphs {
+        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+        let mut graph = Graph::new();
+
+        let _m = graph.parse_file(&file_name);
+
+        for num_threads in nums_threads {
+            graph.init_graph();
+            let start = Instant::now();
+            let iter = graph.compute_coreness_iterator(&num_threads, &0);
+
+            let data = "estimates_iterator".to_owned()
+                + ","
+                + graph_name
+                + ","
+                + format!("{:?}", start.elapsed()).as_str()
+                + ","
+                + "0"
+                + ","
+                + num_threads.to_string().as_str()
+                + ","
+                + iter.to_string().as_str()
+                + "\n";
+            let _n = file.write_all(data.as_bytes());
+        }
+    }
+
+    for graph_name in graphs {
+        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+        let mut graph = Graph::new();
+
+        let _m = graph.parse_file(&file_name);
+
+        for num_threads in nums_threads {
+            for chunk_size in batch_sizes {
+                graph.init_graph();
+                let start = Instant::now();
+                let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
+
+                let data = "estimates_threadpool".to_owned()
+                    + ","
+                    + graph_name
+                    + ","
+                    + format!("{:?}", start.elapsed()).as_str()
+                    + ","
+                    + chunk_size.to_string().as_str()
+                    + ","
+                    + num_threads.to_string().as_str()
+                    + ","
+                    + iter.to_string().as_str()
+                    + "\n";
+                let _n = file.write_all(data.as_bytes());
+            }
+        }
+    }
+
+    for graph_name in graphs {
+        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+        let mut graph = Graph::new();
+
+        let _m = graph.parse_file(&file_name);
+
+        for num_threads in nums_threads {
+            for chunk_size in batch_sizes {
+                graph.init_graph();
+                let start = Instant::now();
+                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
+
+                let data = "estimates_threads".to_owned()
+                    + ","
+                    + graph_name
+                    + ","
+                    + format!("{:?}", start.elapsed()).as_str()
+                    + ","
+                    + chunk_size.to_string().as_str()
+                    + ","
+                    + num_threads.to_string().as_str()
+                    + ","
+                    + iter.to_string().as_str()
+                    + "\n";
+                let _n = file.write_all(data.as_bytes());
+            }
+        }
+    }
 }
