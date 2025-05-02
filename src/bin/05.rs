@@ -488,24 +488,17 @@ fn main() -> std::io::Result<()> {
 #[test]
 fn test() {
     use std::fs::OpenOptions;
-    let graphs: [&str; 10] = [
-        "web-Stanford",
+    let graphs: [&str; 3] = [
         "web-BerkStan",
-        "web-Google",
-        "web-NotreDame",
-        "wiki-Talk",
         "soc-pokec-relationships",
         "soc-LiveJournal1",
-        "roadNet-CA",
-        "roadNet-PA",
-        "roadNet-TX",
     ];
 
     let data_file = "./data/graph_data.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
-    let nums_threads: [usize; 1] = [6];
+    let nums_threads: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
     // apro file in append mode
     let mut file = OpenOptions::new()
@@ -514,52 +507,6 @@ fn test() {
         .open(data_file)
         .unwrap();
 
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
-                let data = "k_max: ".to_owned()
-                    + graph
-                        .inmap
-                        .iter()
-                        .map(|x| x.coreness)
-                        .max()
-                        .unwrap()
-                        .to_string()
-                        .as_str()
-                    + ",   k_avg: "
-                    + (graph
-                        .inmap
-                        .iter()
-                        .map(|x| x.coreness)
-                        .reduce(|a, b| a + b)
-                        .unwrap() as f64
-                        / graph.inmap.len() as f64)
-                        .to_string()
-                        .as_str()
-                    + ",   d_avg: "
-                    + (graph
-                        .inmap
-                        .iter()
-                        .map(|x| x.neighbors.len())
-                        .reduce(|a, b| a + b)
-                        .unwrap() as f64
-                        / graph.inmap.len() as f64)
-                        .to_string()
-                        .as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
-            }
-        }
-    }
-    /*
     for graph_name in graphs {
         let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
         let mut graph = Graph::new();
@@ -643,5 +590,5 @@ fn test() {
                 let _n = file.write_all(data.as_bytes());
             }
         }
-    }*/
+    }
 }

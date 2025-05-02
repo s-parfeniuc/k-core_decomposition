@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Instant;
 use std::usize::MAX;
 /*
-Utilizzo di AtomicUsize: i nodi non hanno più una coda di messaggi e accedono direttamente ai valori di
+Utilizzo di AtomicUsize: i nodi non hanno più una coda di messaggi e accedono direttamente ai valori di coreness dei vicini
 */
 
 struct Node {
@@ -63,6 +63,8 @@ impl Node {
     pub fn compute_index(&mut self) -> usize {
         let core = self.coreness.load(Ordering::SeqCst);
 
+        self.changed = false;
+
         if !self.message.load(Ordering::SeqCst) {
             return core;
         }
@@ -75,7 +77,7 @@ impl Node {
         count.resize(core + 1, 0);
 
         for neighbor in self.neighbors.iter() {
-            let v2 = neighbor.1.load(Ordering::SeqCst);
+            let v2 = neighbor.1.load(Ordering::Acquire);
             let k = cmp::min(core, v2);
             count[k] += 1;
         }
@@ -91,23 +93,24 @@ impl Node {
         if i < core {
             self.changed = true;
         }
+        self.changed = self.send_messages();
+
         self.coreness.store(i, Ordering::SeqCst);
 
         return i;
     }
 
-    pub fn send_messages(&mut self) {
+    pub fn send_messages(&mut self) -> bool {
         if self.changed {
             self.changed = false;
             for neighbor in &mut self.neighbors {
-                /*
-                if self.coreness.load(Ordering::SeqCst) < neighbor.1.load(Ordering::SeqCst) {
+                if self.coreness.load(Ordering::SeqCst) <= neighbor.1.load(Ordering::SeqCst) {
                     neighbor.2.store(true, Ordering::SeqCst);
                 }
-                */
-                neighbor.2.store(true, Ordering::SeqCst);
             }
+            return true;
         }
+        false
     }
 }
 
@@ -211,7 +214,6 @@ impl Graph {
                         for node in chunk.iter_mut() {
                             node.compute_index();
                             changed |= node.changed;
-                            node.send_messages();
                         }
 
                         if changed {
@@ -390,7 +392,7 @@ fn main() -> std::io::Result<()> {
 
     // algoritmo di calcolo coreness dei nodi con parallel iterator
     start = Instant::now();
-    graph.compute_coreness_iterator(&6, &512);
+    graph.compute_coreness_iterator(&12, &512);
     println!(
         "Per calcolare coreness con parallel iterator: {:?}",
         start.elapsed()
@@ -400,7 +402,7 @@ fn main() -> std::io::Result<()> {
 
     // calcolo coreness tramite threadpool
     start = Instant::now();
-    let iter = graph.compute_coreness_threadpool(&6, &512);
+    let iter = graph.compute_coreness_threadpool(&12, &512);
     println!(
         "Per calcolare coreness con threadpool: {:?} in {} iterazioni",
         start.elapsed(),
@@ -410,7 +412,7 @@ fn main() -> std::io::Result<()> {
     // calcolo coreness tramite threads
     graph.init_graph();
     start = Instant::now();
-    graph.compute_coreness_threads(&6, &512);
+    graph.compute_coreness_threads(&12, &512);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
 
     // scrittura valori di coreness dei nodi
