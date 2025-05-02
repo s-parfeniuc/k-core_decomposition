@@ -424,24 +424,17 @@ fn main() -> std::io::Result<()> {
 #[test]
 fn test() {
     use std::fs::OpenOptions;
-    let graphs: [&str; 10] = [
-        "web-Stanford",
+    let graphs: [&str; 3] = [
         "web-BerkStan",
-        "web-Google",
-        "web-NotreDame",
-        "wiki-Talk",
         "soc-pokec-relationships",
         "soc-LiveJournal1",
-        "roadNet-CA",
-        "roadNet-PA",
-        "roadNet-TX",
     ];
 
     let data_file = "./data/graph_data.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
-    let nums_threads: [usize; 1] = [6];
+    let nums_threads: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 
     // apro file in append mode
     let mut file = OpenOptions::new()
