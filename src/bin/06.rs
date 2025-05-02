@@ -266,6 +266,9 @@ fn thread_routine(
         continua = false;
         let est = shared_messages.read().unwrap();
         let mut nodes_to_compute: VecDeque<usize> = (0..local_estimate.len()).collect(); // metto tutti i nodi in coda per aggiornare la coreness
+        for node in subgraph.iter_mut() {
+            node.in_queue = true;
+        }
         while !nodes_to_compute.is_empty() {
             let node_index = nodes_to_compute.pop_front().unwrap();
             subgraph[node_index].in_queue = false;

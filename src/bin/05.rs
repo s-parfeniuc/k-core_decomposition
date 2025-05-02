@@ -501,7 +501,7 @@ fn test() {
         "roadNet-TX",
     ];
 
-    let data_file = "./data/progress_data.csv";
+    let data_file = "./data/graph_data.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
@@ -514,6 +514,52 @@ fn test() {
         .open(data_file)
         .unwrap();
 
+    for graph_name in graphs {
+        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+        let mut graph = Graph::new();
+
+        let _m = graph.parse_file(&file_name);
+
+        for num_threads in nums_threads {
+            for chunk_size in batch_sizes {
+                graph.init_graph();
+                let start = Instant::now();
+                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
+                let data = "k_max: ".to_owned()
+                    + graph
+                        .inmap
+                        .iter()
+                        .map(|x| x.coreness)
+                        .max()
+                        .unwrap()
+                        .to_string()
+                        .as_str()
+                    + ",   k_avg: "
+                    + (graph
+                        .inmap
+                        .iter()
+                        .map(|x| x.coreness)
+                        .reduce(|a, b| a + b)
+                        .unwrap() as f64
+                        / graph.inmap.len() as f64)
+                        .to_string()
+                        .as_str()
+                    + ",   d_avg: "
+                    + (graph
+                        .inmap
+                        .iter()
+                        .map(|x| x.neighbors.len())
+                        .reduce(|a, b| a + b)
+                        .unwrap() as f64
+                        / graph.inmap.len() as f64)
+                        .to_string()
+                        .as_str()
+                    + "\n";
+                let _n = file.write_all(data.as_bytes());
+            }
+        }
+    }
+    /*
     for graph_name in graphs {
         let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
         let mut graph = Graph::new();
@@ -597,5 +643,5 @@ fn test() {
                 let _n = file.write_all(data.as_bytes());
             }
         }
-    }
+    }*/
 }

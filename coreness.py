@@ -1,6 +1,8 @@
-#!/usr/bin/env python
+#!/home/tesi/version01/.venv/bin/python
 import networkx as nx
 import sys
+import time
+import csv
 
 def read_graph_from_file(file_path):
     G = nx.Graph()
@@ -24,21 +26,58 @@ def save_coreness_to_file(coreness, output_file):
     except Exception as e:
         print(e)
 
-def main(input_file, output_file):
-    # 1. Leggi il grafo dal file
-    G = read_graph_from_file(input_file)
+def main():
+    data_filename = "data/networkx.csv"
+    graphs = [
+        "p2p-Gnutella08",
+        "web-Stanford",
+        "web-BerkStan",
+        "web-Google",
+        "web-NotreDame",
+        "wiki-Talk",
+        "soc-pokec-relationships",
+        "soc-LiveJournal1",
+        "roadNet-CA",
+        "roadNet-PA",
+        "roadNet-TX",
+    ]
+
+    with open(data_filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        
+        for graph_name in graphs:
+            input_file = f"graphs/{graph_name}/{graph_name}.txt"
+
+            G = read_graph_from_file(input_file)
+            G.remove_edges_from(nx.selfloop_edges(G))
+
+            start_time = time.time()  
+            coreness = calculate_coreness(G) 
+            end_time = time.time() 
+
+            coreness_values = list(coreness.values())
+            coreness_media = sum(coreness_values) / len(coreness_values)
+            coreness_massima = max(coreness_values)
+
+            degree_values = dict(G.degree())
+            grado_massimo = max(degree_values.values())
+
+            print(graph_name + ": k_avg:" + str(coreness_media) + ", k_max: " + str(coreness_massima) + ", d_max: " + str(grado_massimo) + ", runtime: " + str(end_time - start_time) + "s")
+            
+#            for _ in range(5):
+#                start_time = time.time()  
+#                coreness = calculate_coreness(G) 
+#                end_time = time.time() 
+#                try:
+#                    execution_time = end_time - start_time  # tempo di esecuzione
+#                except:
+#                    execution_time = "0s"
+#                writer.writerow([graph_name, str(execution_time) + "s"])
+                
+            
     
-    # 2. Calcola la coreness
-    coreness = calculate_coreness(G)
-    
-    # 3. Salva il risultato su un file
-    save_coreness_to_file(coreness, output_file)
-    print(f"Coreness salvata in {output_file}")
 
 if __name__ == "__main__":
-    if len(sys.argv)== 2:
-        input_file : str = sys.argv[1]
-        output_file = sys.argv[2]
-    else:
-        sys.exit(1)
-    main(input_file, output_file)
+    main()
+
+
