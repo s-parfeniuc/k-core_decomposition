@@ -279,29 +279,30 @@ fn test() {
         .append(true)
         .open(data_file)
         .unwrap();
+    for _ in 0..5 {
+        for graph_name in graphs {
+            let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
+            let mut graph = Graph::new();
 
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
+            let _m = graph.parse_file(&file_name);
 
-        let _m = graph.parse_file(&file_name);
+            graph.init_graph();
+            let start = Instant::now();
+            let iter = graph.compute_coreness();
 
-        graph.init_graph();
-        let start = Instant::now();
-        let iter = graph.compute_coreness();
-
-        let data = "single_threaded".to_owned()
-            + ","
-            + graph_name
-            + ","
-            + format!("{:?}", start.elapsed()).as_str()
-            + ","
-            + "0"
-            + ","
-            + 1.to_string().as_str()
-            + ","
-            + iter.to_string().as_str()
-            + "\n";
-        let _n = file.write_all(data.as_bytes());
+            let data = "single_threaded".to_owned()
+                + ","
+                + graph_name
+                + ","
+                + format!("{:?}", start.elapsed()).as_str()
+                + ","
+                + "0"
+                + ","
+                + 1.to_string().as_str()
+                + ","
+                + iter.to_string().as_str()
+                + "\n";
+            let _n = file.write_all(data.as_bytes());
+        }
     }
 }

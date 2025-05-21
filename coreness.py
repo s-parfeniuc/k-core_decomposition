@@ -55,14 +55,7 @@ def main():
             coreness = calculate_coreness(G) 
             end_time = time.time() 
 
-            coreness_values = list(coreness.values())
-            coreness_media = sum(coreness_values) / len(coreness_values)
-            coreness_massima = max(coreness_values)
-
-            degree_values = dict(G.degree())
-            grado_massimo = max(degree_values.values())
-
-            print(graph_name + ": k_avg:" + str(coreness_media) + ", k_max: " + str(coreness_massima) + ", d_max: " + str(grado_massimo) + ", runtime: " + str(end_time - start_time) + "s")
+            print(graph_name + ", runtime: " + str(end_time - start_time) + "s")
             
 #            for _ in range(5):
 #                start_time = time.time()  

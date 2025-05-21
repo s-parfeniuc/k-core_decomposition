@@ -41,6 +41,44 @@ impl Graph {
     }
 }
 
+pub struct Queue {
+    queues: Vec<VecDeque<usize>>,
+}
+
+impl Queue {
+    pub fn new(max_k: usize) -> Self {
+        let mut queues = Vec::with_capacity(max_k + 1);
+        for _ in 0..=max_k {
+            queues.push(VecDeque::new());
+        }
+        Self { queues }
+    }
+
+    /// Inserisce un elemento `value` nella coda di priorità `k`
+    pub fn push(&mut self, k: usize, value: usize) {
+        if k < self.queues.len() {
+            self.queues[k].push_back(value);
+        } else {
+            panic!("Priorità fuori dai limiti: {}", k);
+        }
+    }
+
+    /// Estrae il primo elemento disponibile dalla coda di priorità più alta (cioè dal primo indice non vuoto)
+    pub fn pop(&mut self) -> Option<usize> {
+        for queue in &mut self.queues {
+            if let Some(value) = queue.pop_front() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// Controlla se tutte le code sono vuote
+    pub fn is_empty(&self) -> bool {
+        self.queues.iter().all(|q| q.is_empty())
+    }
+}
+
 struct Data {
     graph: Graph,
     est: Vec<usize>,
@@ -93,22 +131,32 @@ fn compute_index(coreness: &mut Data, u: usize) -> usize {
 }
 
 fn compute_coreness_queue(core: &mut Data) {
+    let max_est = *core.est.iter().max().unwrap_or(&1); // evita log2(0)
+    let max_k = (max_est as f64).log2().floor() as usize;
+    let mut queue = Queue::new(max_k);
     for i in 0..core.graph.inmap.len() {
-        core.queue.push_front(i);
+        queue.push(0, i);
     }
-
-    while !core.queue.is_empty() {
-        if let Some(node) = core.queue.pop_front() {
+    let mut elaborazioni = 0;
+    let mut elaborazioni_vere = 0;
+    let mut vicini_visti = 0;
+    while !queue.is_empty() {
+        if let Some(node) = queue.pop() {
+            elaborazioni += 1;
             core.changed[node] = false;
             let old_estimate = core.est[node];
             let new_estimate = compute_index(core, node);
+
             if new_estimate < old_estimate {
+                elaborazioni_vere += 1;
+                vicini_visti += &core.graph.inmap[node].len();
                 for i in &core.graph.inmap[node] {
                     if !core.changed[*i]
                         && new_estimate < core.est[*i]
                         && old_estimate >= core.est[*i]
                     {
-                        core.queue.push_front(*i);
+                        let priority = (core.est[*i] as f64).log2().floor() as usize;
+                        queue.push(priority, *i);
                         core.changed[*i] = true;
                     }
                 }
@@ -116,6 +164,47 @@ fn compute_coreness_queue(core: &mut Data) {
             }
         }
     }
+    println!("Nodi elaborati {} volte in tutto", elaborazioni);
+    println!("Nodi cambiati {} volte in tutto", elaborazioni_vere);
+    println!("Vicini visti {}", vicini_visti);
+}
+
+fn compute_coreness_queue_normal(core: &mut Data) {
+    for i in 0..core.graph.inmap.len() {
+        core.queue.push_back(i);
+    }
+    let mut elaborazioni = 0;
+    let mut elaborazioni_vere = 0;
+    let mut vicini_visti = 0;
+    while !core.queue.is_empty() {
+        if let Some(node) = core.queue.pop_front() {
+            elaborazioni += 1;
+            core.changed[node] = false;
+            let old_estimate = core.est[node];
+            let new_estimate = compute_index(core, node);
+
+            if new_estimate < old_estimate {
+                elaborazioni_vere += 1;
+                vicini_visti += &core.graph.inmap[node].len();
+                for i in &core.graph.inmap[node] {
+                    if !core.changed[*i]
+                        && new_estimate < core.est[*i]
+                        && old_estimate >= core.est[*i]
+                    {
+                        core.queue.push_back(*i);
+                        core.changed[*i] = true;
+                    }
+                }
+                core.est[node] = new_estimate;
+            }
+        }
+    }
+    println!(
+        "Nodi elaborati {} volte in tutto senza priority",
+        elaborazioni
+    );
+    println!("Nodi cambiati {} volte in tutto", elaborazioni_vere);
+    println!("Vicini visti {}", vicini_visti);
 }
 
 fn compute_coreness(core: &mut Data) {
@@ -181,6 +270,8 @@ fn main() -> io::Result<()> {
     let mut algorithm: Data = Data::new(graph);
 
     compute_coreness_queue(&mut algorithm);
+
+    //compute_coreness_queue_normal(&mut algorithm);
 
     println!("Per calcolare coreness version01: {:?}", start.elapsed());
 

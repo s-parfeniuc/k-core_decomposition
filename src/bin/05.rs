@@ -12,12 +12,15 @@ use std::thread;
 use std::time::Instant;
 use std::usize::MAX;
 /*
-Ottimizzazione: invio di messaggi solo se il proprio estimate è minore di quello a cui stiamo inviando il messaggio.
+ParallelK: utilizza struttura Estimates, che gestisce le stime dei vicini utilizzando un vettore ordinato; struttura MessageMail, unico punto di interazione
+tra i nodi: una VecDeque wrappata con un mutex. Sono stati implementati 3 metodi separati che usano threadpool, parallel_iterator e thread nativi di Rust.
+Ottimizzazioni: invio selettivo di messaggi, vettore ordinato al posto di hashmap, scrittura e lettura nella stessa fase.
 */
 
 struct Estimates {
     est: Vec<(usize, usize)>,
 }
+
 impl Estimates {
     pub fn new() -> Self {
         Self { est: Vec::new() }
@@ -41,6 +44,7 @@ impl Estimates {
         self.est[index].1
     }
 }
+
 struct MessageMail {
     messages: VecDeque<(usize, usize)>,
 }
@@ -450,7 +454,6 @@ fn main() -> std::io::Result<()> {
     graph.parse_file(in_file)?;
     println!("Per parsare il file: {:?}", start.elapsed());
 
-    // inizializza le variabili necessarie per l'algoritmo
     start = Instant::now();
     graph.init_graph();
     println!("Per inizializzare i nodi: {:?}", start.elapsed());
@@ -488,17 +491,24 @@ fn main() -> std::io::Result<()> {
 #[test]
 fn test() {
     use std::fs::OpenOptions;
-    let graphs: [&str; 3] = [
+    let graphs: [&str; 10] = [
+        "web-Stanford",
         "web-BerkStan",
+        "web-Google",
+        "web-NotreDame",
+        "wiki-Talk",
         "soc-pokec-relationships",
         "soc-LiveJournal1",
+        "roadNet-CA",
+        "roadNet-PA",
+        "roadNet-TX",
     ];
 
-    let data_file = "./data/graph_data.csv";
+    let data_file = "./data/progress_data.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
-    let nums_threads: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
+    let nums_threads: [usize; 1] = [16];
 
     // apro file in append mode
     let mut file = OpenOptions::new()
@@ -514,80 +524,26 @@ fn test() {
         let _m = graph.parse_file(&file_name);
 
         for num_threads in nums_threads {
-            graph.init_graph();
-            let start = Instant::now();
-            let iter = graph.compute_coreness_iterator(&num_threads, &0);
-
-            let data = "onephase_optimized_iterator".to_owned()
-                + ","
-                + graph_name
-                + ","
-                + format!("{:?}", start.elapsed()).as_str()
-                + ","
-                + "0"
-                + ","
-                + num_threads.to_string().as_str()
-                + ","
-                + iter.to_string().as_str()
-                + "\n";
-            let _n = file.write_all(data.as_bytes());
-        }
-    }
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
             for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
+                for _ in 0..5 {
+                    graph.init_graph();
+                    let start = Instant::now();
+                    let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
 
-                let data = "onephase_optimized_threadpool".to_owned()
-                    + ","
-                    + graph_name
-                    + ","
-                    + format!("{:?}", start.elapsed()).as_str()
-                    + ","
-                    + chunk_size.to_string().as_str()
-                    + ","
-                    + num_threads.to_string().as_str()
-                    + ","
-                    + iter.to_string().as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
-            }
-        }
-    }
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
-
-                let data = "onephase_optimized_threads".to_owned()
-                    + ","
-                    + graph_name
-                    + ","
-                    + format!("{:?}", start.elapsed()).as_str()
-                    + ","
-                    + chunk_size.to_string().as_str()
-                    + ","
-                    + num_threads.to_string().as_str()
-                    + ","
-                    + iter.to_string().as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
+                    let data = "fastK".to_owned()
+                        + ","
+                        + graph_name
+                        + ","
+                        + format!("{:?}", start.elapsed()).as_str()
+                        + ","
+                        + chunk_size.to_string().as_str()
+                        + ","
+                        + num_threads.to_string().as_str()
+                        + ","
+                        + iter.to_string().as_str()
+                        + "\n";
+                    let _n = file.write_all(data.as_bytes());
+                }
             }
         }
     }

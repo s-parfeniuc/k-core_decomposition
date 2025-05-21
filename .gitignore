@@ -5,4 +5,11 @@
 /graphs
 /make_graph.py
 /make_graph1.py
+/make_speedup.py
+/visual_graphs
+/data
+/data_local
+/new_data
+/xgraph.py
 /Tesi.txt
+/.venv

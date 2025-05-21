@@ -505,11 +505,11 @@ fn test() {
         "roadNet-TX",
     ];
 
-    let data_file = "./data/progress_data.csv";
+    let data_file = "./data/hashmap.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
-    let nums_threads: [usize; 1] = [6];
+    let nums_threads: [usize; 1] = [16];
 
     // apro file in append mode
     let mut file = OpenOptions::new()

@@ -1,22 +1,67 @@
 #![allow(dead_code)]
+use crossbeam::queue::SegQueue;
 use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use std::cmp;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Barrier;
-use std::sync::RwLock;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
 use std::usize::MAX;
 /*
-Utilizzo di AtomicUsize: i nodi non hanno più una coda di messaggi e accedono direttamente ai valori di coreness dei vicini
+Utilizzo di AtomicUsize: i nodi non hanno più una coda di messaggi e accedono direttamente ai valori di coreness dei vicini. In più introdotta una priority
+con livelli diversi di priorità in base al numero di coreness
 */
+
+pub struct ChunkPriorityQueue {
+    queues: Vec<Arc<SegQueue<usize>>>, // ogni priorità ha una queue di indici
+    k_max: usize,
+}
+
+impl ChunkPriorityQueue {
+    pub fn new(k_max: usize) -> Self {
+        let queues = (0..=k_max).map(|_| Arc::new(SegQueue::new())).collect();
+        Self { queues, k_max }
+    }
+
+    pub fn push(&self, coreness: usize, index: usize) {
+        assert!(
+            coreness <= self.k_max,
+            "coreness oltre il massimo consentito"
+        );
+        self.queues[coreness].push(index);
+    }
+
+    pub fn pop_chunk(&self, chunk_size: usize) -> Option<Vec<usize>> {
+        for queue in &self.queues {
+            if !queue.is_empty() {
+                let mut chunk = Vec::with_capacity(chunk_size);
+                for _ in 0..chunk_size {
+                    if let Some(val) = queue.pop() {
+                        chunk.push(val);
+                    } else {
+                        break;
+                    }
+                }
+                if !chunk.is_empty() {
+                    return Some(chunk);
+                }
+            }
+        }
+        None
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queues.iter().all(|q| q.is_empty())
+    }
+}
 
 struct Node {
     id: usize,
@@ -57,18 +102,16 @@ impl Node {
 
         // invia un messaggio a tutti i vicini
         self.changed = true;
+        self.message.store(true, Ordering::Relaxed);
         self.send_messages();
     }
 
-    pub fn compute_index(&mut self) -> usize {
+    pub fn compute_index(&mut self, queue: &Arc<ChunkPriorityQueue>) -> usize {
+        self.message.store(false, Ordering::SeqCst);
         let core = self.coreness.load(Ordering::SeqCst);
 
         self.changed = false;
 
-        if !self.message.load(Ordering::SeqCst) {
-            return core;
-        }
-        self.message.store(false, Ordering::SeqCst);
         if core == 0 {
             return 0;
         }
@@ -76,8 +119,13 @@ impl Node {
         let mut count: Vec<usize> = Vec::with_capacity(core + 1);
         count.resize(core + 1, 0);
 
+        let mut neighbor_estimates = Vec::new();
+
         for neighbor in self.neighbors.iter() {
             let v2 = neighbor.1.load(Ordering::Acquire);
+
+            neighbor_estimates.push((neighbor.0, v2));
+
             let k = cmp::min(core, v2);
             count[k] += 1;
         }
@@ -91,9 +139,17 @@ impl Node {
             i -= 1;
         }
         if i < core {
+            for neighbor_id in 0..neighbor_estimates.len() {
+                if i < neighbor_estimates[neighbor_id].1 {
+                    self.neighbors[neighbor_id].2.store(true, Ordering::Relaxed);
+                    queue.push(
+                        neighbor_estimates[neighbor_id].1,
+                        neighbor_estimates[neighbor_id].0,
+                    );
+                }
+            }
             self.changed = true;
         }
-        self.changed = self.send_messages();
 
         self.coreness.store(i, Ordering::SeqCst);
 
@@ -104,9 +160,7 @@ impl Node {
         if self.changed {
             self.changed = false;
             for neighbor in &mut self.neighbors {
-                if self.coreness.load(Ordering::SeqCst) <= neighbor.1.load(Ordering::SeqCst) {
-                    neighbor.2.store(true, Ordering::SeqCst);
-                }
+                neighbor.2.store(true, Ordering::SeqCst);
             }
             return true;
         }
@@ -184,187 +238,81 @@ impl Graph {
         Ok(())
     }
 
-    // calcolo coreness utilizzando threadpool, dato che creando un nuovo "task" per ogni singolo nodo
-    // da elaborare introduce troppo overhead, si usano gli iteratori su chunk
-    pub fn compute_coreness_threadpool(
-        &mut self,
-        num_threads: &usize,
-        batch_size: &usize,
-    ) -> usize {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(*num_threads)
-            .build()
+    pub fn compute_coreness_threads(&mut self, num_threads: usize, chunk_size: usize) {
+        let inmap_len = self.inmap.len();
+        let inmap_base = self.inmap.as_ptr() as usize;
+        let inmap_base = Arc::new(inmap_base);
+
+        let k_max = self
+            .inmap
+            .iter()
+            .map(|x| x.coreness.load(Ordering::Relaxed))
+            .max()
             .unwrap();
-        let cont_mutex = RwLock::new(true);
-        let mut cont = true;
 
-        let chunk_size = batch_size;
+        let queue = Arc::new(ChunkPriorityQueue::new(k_max));
 
-        let mut iter: usize = 0;
-
-        while cont {
-            iter += 1;
-            let mut guard = cont_mutex.write().unwrap();
-            *guard = false;
-            drop(guard);
-            pool.scope(|scope| {
-                for chunk in self.inmap.chunks_mut(*chunk_size) {
-                    scope.spawn(|_| {
-                        let mut changed = false;
-                        for node in chunk.iter_mut() {
-                            node.compute_index();
-                            changed |= node.changed;
-                        }
-
-                        if changed {
-                            let mut guard = cont_mutex.write().unwrap();
-                            *guard = true;
-                            drop(guard);
-                        }
-                    });
-                }
-            });
-
-            let guard = cont_mutex.read().unwrap();
-            cont = *guard;
-            drop(guard);
+        // Inserisci tutti i nodi iniziali nella priorità massima
+        for i in 0..inmap_len {
+            queue.push(k_max, i);
         }
-        return iter;
-    }
 
-    pub fn compute_coreness_iterator(&mut self, num_threads: &usize, _batch_size: &usize) -> usize {
-        let mut cont = true;
+        let active_threads = Arc::new(AtomicUsize::new(num_threads));
+        let condvar_pair = Arc::new((Mutex::new(()), Condvar::new()));
 
-        let mut rounds = 0;
+        thread::scope(|s| {
+            for _ in 0..num_threads {
+                let queue = Arc::clone(&queue);
+                let inmap_base = Arc::clone(&inmap_base);
+                let active_threads = Arc::clone(&active_threads);
+                let condvar_pair = Arc::clone(&condvar_pair);
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(*num_threads)
-            .build()
-            .unwrap()
-            .install(|| {
-                while cont {
-                    rounds += 1;
+                s.spawn(move || {
+                    'worker: loop {
+                        match queue.pop_chunk(chunk_size) {
+                            Some(chunk) => {
+                                let base_ptr = *inmap_base as *const Node;
+                                for i in chunk {
+                                    unsafe {
+                                        let node = &mut *(base_ptr.add(i) as *mut Node);
+                                        let _new_coreness = node.compute_index(&queue);
+                                    }
+                                    condvar_pair.1.notify_all();
+                                }
+                            }
 
-                    // computazione in parallelo dei coreness dei nodi
-                    cont = self
-                        .inmap
-                        .par_iter_mut() // itera in modo parallelo il vettore
-                        .map(|x| {
-                            let changed = thread_routine_index(x);
-                            thread_routine_message(x);
-                            return changed;
-                        }) // applica la funzione thread_routine_index a ogni elemento
-                        .reduce(|| false, |a, b| a || b); // or tra tutti i risultati: se almeno uno è stato cambiato si continua
-                }
-            });
-        return rounds;
-    }
+                            None => {
+                                let prev = active_threads.fetch_sub(1, Ordering::SeqCst);
+                                if prev == 1 {
+                                    condvar_pair.1.notify_all(); // ultimo thread notifica chi è in attesa
+                                    break;
+                                }
 
-    pub fn compute_coreness_threads(&mut self, num_threads: &usize, chunk_size: &usize) -> usize {
-        let mut iter: usize = 0;
-        thread::scope(|scope| {
-            let cont_mutex: Arc<Mutex<bool>> = Arc::new(Mutex::new(true));
-            let barrier = Arc::new(Barrier::new(*num_threads + 1));
-            let mut threads = Vec::with_capacity(*num_threads);
+                                let (lock, cvar) = &*condvar_pair;
+                                let mut guard = lock.lock().unwrap();
 
-            let index: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+                                // Attende finché c'è nuova attività o tutto è davvero finito
+                                loop {
+                                    if !queue.is_empty() {
+                                        drop(guard);
+                                        active_threads.fetch_add(1, Ordering::SeqCst);
+                                        break;
+                                    }
 
-            let mut nodes: Vec<Mutex<&mut [Node]>> = Vec::new();
+                                    if active_threads.load(Ordering::SeqCst) == 0 {
+                                        drop(guard);
+                                        break 'worker;
+                                    }
 
-            for chunk in self.inmap.chunks_mut(*chunk_size) {
-                nodes.push(Mutex::new(chunk));
-            }
-
-            let node_list = Arc::new(nodes);
-
-            for _i in 0..*num_threads {
-                let cont_clone = Arc::clone(&cont_mutex);
-                let barrier_clone = Arc::clone(&barrier);
-                let index_clone = Arc::clone(&index);
-                let node_list_clone = Arc::clone(&node_list);
-
-                threads.push(scope.spawn(move || {
-                    thread_routine(cont_clone, barrier_clone, index_clone, node_list_clone);
-                }));
-            }
-
-            let mut continua = true;
-
-            while continua {
-                iter += 1;
-                let mut cont_guard = cont_mutex.lock().unwrap();
-                *cont_guard = false;
-                drop(cont_guard);
-                barrier.wait();
-                // calcolo coreness + invio messaggi
-
-                barrier.wait();
-                let mut index_guard = index.lock().unwrap();
-                *index_guard = 0;
-                drop(index_guard);
-
-                let cont_guard = cont_mutex.lock().unwrap();
-                continua = *cont_guard;
-                drop(cont_guard);
-                barrier.wait();
+                                    guard = cvar.wait(guard).unwrap();
+                                }
+                            }
+                        }
+                    }
+                });
             }
         });
-        return iter;
     }
-}
-
-fn thread_routine(
-    cont: Arc<Mutex<bool>>,
-    barrier: Arc<Barrier>,
-    index: Arc<Mutex<usize>>,
-    node_list: Arc<Vec<Mutex<&mut [Node]>>>,
-) {
-    let mut continua = true;
-    let index_max = node_list.len();
-    while continua {
-        barrier.wait();
-        continua = false;
-
-        // unica fase, calcolo coreness e invio messaggi
-        let mut i = get_and_increment(&index);
-        while i < index_max {
-            for node in node_list[i].lock().unwrap().iter_mut() {
-                node.compute_index();
-                continua |= node.changed;
-                node.send_messages();
-            }
-            i = get_and_increment(&index);
-        }
-
-        let mut cont_guard = cont.lock().unwrap();
-        *cont_guard |= continua;
-        drop(cont_guard);
-        barrier.wait();
-        let cont_guard = cont.lock().unwrap();
-        continua = *cont_guard;
-        drop(cont_guard);
-        barrier.wait();
-    }
-}
-
-fn get_and_increment(index: &Arc<Mutex<usize>>) -> usize {
-    let mut index_guard = index.lock().unwrap();
-    let i = *index_guard;
-    *index_guard += 1;
-    return i;
-}
-// funzione eseguita dai thread in fase di computazione coreness su ogni nodo
-fn thread_routine_index(node: &mut Node) -> bool {
-    node.compute_index();
-    return node.changed;
-}
-
-// funzione eseguita dai thread in fase di invio messaggi
-fn thread_routine_message(node: &mut Node) {
-    // prende le lock dei MessageMail dei vicini, non dei nodi stessi, così c'è contention solo per l'accesso
-    // alla lista di messaggi, non sono possibili deadlock perché si acquisisce una lock alla volta e si
-    // rilascia a fine operazione
-    node.send_messages();
 }
 
 fn main() -> std::io::Result<()> {
@@ -390,141 +338,12 @@ fn main() -> std::io::Result<()> {
     graph.init_graph();
     println!("Per inizializzare i nodi: {:?}", start.elapsed());
 
-    // algoritmo di calcolo coreness dei nodi con parallel iterator
     start = Instant::now();
-    graph.compute_coreness_iterator(&12, &512);
-    println!(
-        "Per calcolare coreness con parallel iterator: {:?}",
-        start.elapsed()
-    );
-
-    graph.init_graph();
-
-    // calcolo coreness tramite threadpool
-    start = Instant::now();
-    let iter = graph.compute_coreness_threadpool(&12, &512);
-    println!(
-        "Per calcolare coreness con threadpool: {:?} in {} iterazioni",
-        start.elapsed(),
-        iter
-    );
-
-    // calcolo coreness tramite threads
-    graph.init_graph();
-    start = Instant::now();
-    graph.compute_coreness_threads(&12, &512);
+    graph.compute_coreness_threads(3, 64);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
 
     // scrittura valori di coreness dei nodi
     graph.write_to_file(&out_file)?;
 
     Ok(())
-}
-
-#[test]
-fn test() {
-    use std::fs::OpenOptions;
-    let graphs: [&str; 3] = [
-        "web-BerkStan",
-        "soc-pokec-relationships",
-        "soc-LiveJournal1",
-    ];
-
-    let data_file = "./data/graph_data.csv";
-
-    let batch_sizes: [usize; 1] = [256];
-
-    let nums_threads: [usize; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
-
-    // apro file in append mode
-    let mut file = OpenOptions::new()
-        .write(true)
-        .append(true)
-        .open(data_file)
-        .unwrap();
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            graph.init_graph();
-            let start = Instant::now();
-            let iter = graph.compute_coreness_iterator(&num_threads, &0);
-
-            let data = "onephase_optimized_iterator".to_owned()
-                + ","
-                + graph_name
-                + ","
-                + format!("{:?}", start.elapsed()).as_str()
-                + ","
-                + "0"
-                + ","
-                + num_threads.to_string().as_str()
-                + ","
-                + iter.to_string().as_str()
-                + "\n";
-            let _n = file.write_all(data.as_bytes());
-        }
-    }
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
-
-                let data = "onephase_optimized_threadpool".to_owned()
-                    + ","
-                    + graph_name
-                    + ","
-                    + format!("{:?}", start.elapsed()).as_str()
-                    + ","
-                    + chunk_size.to_string().as_str()
-                    + ","
-                    + num_threads.to_string().as_str()
-                    + ","
-                    + iter.to_string().as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
-            }
-        }
-    }
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
-
-                let data = "onephase_optimized_threads".to_owned()
-                    + ","
-                    + graph_name
-                    + ","
-                    + format!("{:?}", start.elapsed()).as_str()
-                    + ","
-                    + chunk_size.to_string().as_str()
-                    + ","
-                    + num_threads.to_string().as_str()
-                    + ","
-                    + iter.to_string().as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
-            }
-        }
-    }
 }

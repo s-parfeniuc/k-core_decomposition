@@ -528,11 +528,11 @@ fn test() {
         "roadNet-TX",
     ];
 
-    let data_file = "./data/progress_data.csv";
+    let data_file = "./data/no_hashmap.csv";
 
     let batch_sizes: [usize; 1] = [256];
 
-    let nums_threads: [usize; 1] = [6];
+    let nums_threads: [usize; 1] = [16];
 
     // apro file in append mode
     let mut file = OpenOptions::new()
@@ -546,82 +546,63 @@ fn test() {
         let mut graph = Graph::new();
 
         let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            graph.init_graph();
-            let start = Instant::now();
-            let iter = graph.compute_coreness_iterator(&num_threads, &0);
-
-            let data = "estimates_iterator".to_owned()
-                + ","
-                + graph_name
-                + ","
-                + format!("{:?}", start.elapsed()).as_str()
-                + ","
-                + "0"
-                + ","
-                + num_threads.to_string().as_str()
-                + ","
-                + iter.to_string().as_str()
-                + "\n";
-            let _n = file.write_all(data.as_bytes());
-        }
-    }
-
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
-
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
+        for _ in 0..2 {
+            for num_threads in nums_threads {
                 graph.init_graph();
                 let start = Instant::now();
-                let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
+                let iter = graph.compute_coreness_iterator(&num_threads, &0);
 
-                let data = "estimates_threadpool".to_owned()
+                let data = "estimates_iterator".to_owned()
                     + ","
                     + graph_name
                     + ","
                     + format!("{:?}", start.elapsed()).as_str()
                     + ","
-                    + chunk_size.to_string().as_str()
+                    + "0"
                     + ","
                     + num_threads.to_string().as_str()
                     + ","
                     + iter.to_string().as_str()
                     + "\n";
                 let _n = file.write_all(data.as_bytes());
-            }
-        }
-    }
+                for chunk_size in batch_sizes {
+                    graph.init_graph();
+                    let start = Instant::now();
+                    let iter = graph.compute_coreness_threadpool(&num_threads, &chunk_size);
 
-    for graph_name in graphs {
-        let file_name = "./graphs/".to_owned() + graph_name + "/" + graph_name + ".txt";
-        let mut graph = Graph::new();
+                    let data = "estimates_threadpool".to_owned()
+                        + ","
+                        + graph_name
+                        + ","
+                        + format!("{:?}", start.elapsed()).as_str()
+                        + ","
+                        + chunk_size.to_string().as_str()
+                        + ","
+                        + num_threads.to_string().as_str()
+                        + ","
+                        + iter.to_string().as_str()
+                        + "\n";
+                    let _n = file.write_all(data.as_bytes());
+                }
+                for chunk_size in batch_sizes {
+                    graph.init_graph();
+                    let start = Instant::now();
+                    let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
 
-        let _m = graph.parse_file(&file_name);
-
-        for num_threads in nums_threads {
-            for chunk_size in batch_sizes {
-                graph.init_graph();
-                let start = Instant::now();
-                let iter = graph.compute_coreness_threads(&num_threads, &chunk_size);
-
-                let data = "estimates_threads".to_owned()
-                    + ","
-                    + graph_name
-                    + ","
-                    + format!("{:?}", start.elapsed()).as_str()
-                    + ","
-                    + chunk_size.to_string().as_str()
-                    + ","
-                    + num_threads.to_string().as_str()
-                    + ","
-                    + iter.to_string().as_str()
-                    + "\n";
-                let _n = file.write_all(data.as_bytes());
+                    let data = "estimates_threads".to_owned()
+                        + ","
+                        + graph_name
+                        + ","
+                        + format!("{:?}", start.elapsed()).as_str()
+                        + ","
+                        + chunk_size.to_string().as_str()
+                        + ","
+                        + num_threads.to_string().as_str()
+                        + ","
+                        + iter.to_string().as_str()
+                        + "\n";
+                    let _n = file.write_all(data.as_bytes());
+                }
             }
         }
     }
