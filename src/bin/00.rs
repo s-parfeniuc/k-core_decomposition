@@ -4,7 +4,7 @@ use rayon::iter::ParallelIterator;
 use std::cmp;
 use std::collections::VecDeque;
 use std::fs::File;
-use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::io::{self, BufRead, Write};
 use std::slice;
 use std::sync::atomic::AtomicBool;
@@ -130,6 +130,14 @@ impl Graph {
         Graph { inmap: Vec::new() }
     }
 
+    pub fn print_info(&self) {
+        println!(
+            "Numero di nodi: {}, Numero di archi: {}",
+            self.inmap.len(),
+            self.inmap.iter().map(|x| x.neighbors.len()).sum::<usize>() / 2,
+        );
+    }
+
     pub fn add_edge(&mut self, i: usize, j: usize) {
         if i >= self.inmap.len() || j >= self.inmap.len() {
             let old_len = self.inmap.len();
@@ -173,6 +181,22 @@ impl Graph {
                 println!("Skipping invalid line: {}", line);
             }
         }
+        Ok(())
+    }
+
+    pub fn write_edges_undirected(&self, path: &str) -> io::Result<()> {
+        let file = File::create(path)?;
+        let mut writer = BufWriter::new(file);
+
+        for node in &self.inmap {
+            let u = node.id;
+            for &v in &node.neighbors {
+                if u < v {
+                    writeln!(writer, "{} {}", u, v)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -557,7 +581,7 @@ fn main() -> std::io::Result<()> {
     graph.compute_coreness_threads_hybrid(6, 128);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
     // scrittura valori di coreness dei nodi
-    graph.write_to_file(&out_file)?;
+    graph.write_edges_undirected(&out_file)?;
 
     Ok(())
 }

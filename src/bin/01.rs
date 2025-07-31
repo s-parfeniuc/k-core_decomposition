@@ -195,7 +195,7 @@ impl Graph {
         let mut file = File::create(filename)?;
 
         for n in &self.inmap {
-            writeln!(file, "{}", n.borrow().coreness)?;
+            writeln!(file, "{}", n.borrow().neighbors.len())?;
         }
 
         Ok(())
@@ -215,6 +215,16 @@ impl Graph {
             }
         }
         iter
+    }
+
+    // stampa informazioni sul grafo come numero di nodi e archi
+    pub fn print_info(&self) {
+        println!("Numero di nodi: {}", self.inmap.len());
+        let mut edges = 0;
+        for node in &self.inmap {
+            edges += node.borrow().neighbors.len();
+        }
+        println!("Numero di archi: {}", edges / 2);
     }
 }
 
@@ -240,7 +250,7 @@ fn main() -> std::io::Result<()> {
     start = Instant::now();
     graph.init_graph();
     println!("Per inizializzare i nodi: {:?}", start.elapsed());
-
+    graph.print_info();
     // algoritmo di calcolo coreness dei nodi
     start = Instant::now();
     graph.compute_coreness();
