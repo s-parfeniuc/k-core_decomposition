@@ -379,7 +379,7 @@ fn main() -> std::io::Result<()> {
 
     println!("Per parsare il file: {:?}", start.elapsed());
     start = Instant::now();
-    let iterations = graph.compute_coreness_threads(6, 1024);
+    let iterations = graph.compute_coreness_threads(16, 1024);
     println!(
         "Per calcolare coreness con threads in {:?} iterazioni: {:?}",
         iterations,
@@ -408,9 +408,8 @@ fn should_process_node(est_u: usize, avg: usize, rng: &mut SmallRng) -> bool {
     if est_u <= avg {
         return true;
     }
-
     // più alto è est_u, minore è chance (scala su 0–255)
     let diff = est_u.saturating_sub(avg);
-    let scaled = (256 * avg) / (avg + diff); // p ∈ [0, 256]
+    let scaled = (256 * avg) / (avg + diff); // p in [0, 256]
     rng.next_u32() % 256 < scaled as u32
 }
