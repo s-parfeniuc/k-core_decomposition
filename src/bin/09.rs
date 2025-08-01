@@ -378,7 +378,7 @@ fn main() -> std::io::Result<()> {
     let mut graph = Graph::parse_file(in_file);
     println!("Per parsare il file: {:?}", start.elapsed());
     start = Instant::now();
-    let iterations = graph.compute_coreness_threads(6, 1024);
+    let iterations = graph.compute_coreness_threads(16, 1024);
     println!(
         "Per calcolare coreness con threads in {:?} iterazioni: {:?}",
         iterations,
