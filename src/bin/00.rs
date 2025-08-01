@@ -581,7 +581,7 @@ fn main() -> std::io::Result<()> {
     graph.compute_coreness_threads_hybrid(6, 128);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
     // scrittura valori di coreness dei nodi
-    graph.write_edges_undirected(&out_file)?;
+    graph.write_to_file(&out_file)?;
 
     Ok(())
 }
