@@ -3,6 +3,7 @@ use rand::rngs::SmallRng;
 use rand::RngCore;
 use rand::SeedableRng;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::BufReader;
@@ -16,7 +17,7 @@ use std::thread;
 use std::time::Instant;
 
 const ITERATION_OPTIMIZATION_1: usize = 7; // numero di iterazioni perché si attivi l'ottimizzazione 1
-const ITERATION_OPTIMIZATION_2: usize = 5; // numero di iterazioni in cui è attiva l'ottimizzazione 2
+const ITERATION_OPTIMIZATION_2: usize = 1; // numero di iterazioni in cui è attiva l'ottimizzazione 2
 const AVERAGE_DEGREE_FACTOR: usize = 3;
 
 pub struct Graph {
@@ -378,7 +379,7 @@ fn main() -> std::io::Result<()> {
     let mut graph = Graph::parse_file(in_file);
     println!("Per parsare il file: {:?}", start.elapsed());
     start = Instant::now();
-    let iterations = graph.compute_coreness_threads(16, 1024);
+    let iterations = graph.compute_coreness_threads(6, 1024);
     println!(
         "Per calcolare coreness con threads in {:?} iterazioni: {:?}",
         iterations,
