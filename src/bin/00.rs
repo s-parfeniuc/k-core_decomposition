@@ -568,7 +568,7 @@ fn main() -> std::io::Result<()> {
 
     graph.init_graph();
     start = Instant::now();
-    graph.compute_coreness_threads(6, 128);
+    graph.compute_coreness_threads(16, 128);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
 
     let mut coreness = Vec::new();
