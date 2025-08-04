@@ -479,7 +479,7 @@ fn main() -> std::io::Result<()> {
     // calcolo coreness tramite threads
     graph.init_graph();
     start = Instant::now();
-    graph.compute_coreness_threads(&6, &512);
+    graph.compute_coreness_threads(&16, &256);
     println!("Per calcolare coreness con threads: {:?}", start.elapsed());
 
     // scrittura valori di coreness dei nodi
